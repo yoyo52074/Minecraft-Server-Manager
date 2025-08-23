@@ -23,6 +23,7 @@ class ServerManager:
                 response.raise_for_status()
                 return [v['id'] for v in response.json()['versions'] if v['type'] == 'release']
             elif core_name == "Forge":
+                # 僅為範例，實際應用中可能需要解析 Forge 官網來獲取更完整的列表
                 return ["1.20.1", "1.19.4", "1.18.2", "1.16.5"]
         except requests.RequestException as e:
             print(f"獲取 {core_name} 版本列表失敗: {e}")
@@ -51,25 +52,31 @@ class ServerManager:
         manifest_url = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
         version_manifest = requests.get(manifest_url, timeout=15).json()
         version_info_url = next((v['url'] for v in version_manifest['versions'] if v['id'] == version), None)
-        if not version_info_url: return None, "找不到該 Vanilla 版本"
+        if not version_info_url:
+            return None, "找不到該 Vanilla 版本"
         version_info = requests.get(version_info_url, timeout=15).json()
         download_url = version_info['downloads']['server']['url']
         jar_name = f"vanilla-{version}.jar"
         return self._download_file(download_url, jar_name, progress_callback)
 
     def _download_forge(self, version, progress_callback):
+        # 注意：Forge 的直接下載連結較不穩定，此處僅為範例
         forge_urls = {
             "1.20.1": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar",
             "1.19.4": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.19.4-45.2.0/forge-1.19.4-45.2.0-installer.jar",
+            "1.18.2": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.18.2-40.2.1/forge-1.18.2-40.2.1-installer.jar",
+            "1.16.5": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-installer.jar"
         }
-        if version not in forge_urls: return None, f"Forge {version} 的範例下載連結不存在"
+        if version not in forge_urls:
+            return None, f"Forge {version} 的範例下載連結不存在"
         download_url = forge_urls[version]
         jar_name = f"forge-{version}-installer.jar"
         return self._download_file(download_url, jar_name, progress_callback)
 
     def _download_file(self, url, filename, progress_callback):
         filepath = os.path.join(self.server_directory, filename)
-        if os.path.exists(filepath): return filepath, f"檔案 '{os.path.basename(filename)}' 已存在。"
+        if os.path.exists(filepath):
+            return filepath, f"檔案 '{os.path.basename(filename)}' 已存在。"
         
         with requests.get(url, stream=True, allow_redirects=True, timeout=30) as r:
             r.raise_for_status()
@@ -77,22 +84,34 @@ class ServerManager:
             with open(filepath, 'wb') as f:
                 bytes_downloaded = 0
                 for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk); bytes_downloaded += len(chunk)
-                    if total_size > 0: progress_callback((bytes_downloaded / total_size) * 100)
+                    f.write(chunk)
+                    bytes_downloaded += len(chunk)
+                    if total_size > 0:
+                        progress_callback((bytes_downloaded / total_size) * 100)
         return filepath, f"'{os.path.basename(filename)}' 下載完成。"
 
     def get_server_properties(self):
         properties = {}
-        if not os.path.exists(self.properties_path): return {}
-        with open(self.properties_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip() and not line.startswith('#'):
-                    key, value = line.strip().split('=', 1)
-                    properties[key] = value
+        if not os.path.exists(self.properties_path):
+            return {}
+        try:
+            with open(self.properties_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip() and not line.startswith('#'):
+                        key, value = line.strip().split('=', 1)
+                        properties[key] = value
+        except Exception as e:
+            print(f"讀取 server.properties 時發生錯誤: {e}")
         return properties
 
     def save_server_properties(self, properties):
-        with open(self.properties_path, 'w', encoding='utf-8') as f:
-            f.write("# Minecraft server properties\n")
-            for key, value in properties.items():
-                f.write(f"{key}={value}\n")
+        try:
+            with open(self.properties_path, 'w', encoding='utf-8') as f:
+                f.write("# Minecraft server properties\n")
+                # 確保有時間戳
+                from datetime import datetime
+                f.write(f"# {datetime.now().strftime('%a %b %d %H:%M:%S %Z %Y')}\n")
+                for key, value in properties.items():
+                    f.write(f"{key}={value}\n")
+        except Exception as e:
+            print(f"儲存 server.properties 時發生錯誤: {e}")

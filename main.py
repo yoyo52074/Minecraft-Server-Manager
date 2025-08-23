@@ -14,9 +14,7 @@ import ttkbootstrap as tk
 from ttkbootstrap import ttk
 
 from server_manager import ServerManager
-from ui_components import MainAppWindow, ServerSettingsWindow
-
-# PlayitSetupInfoWindow 已不再需要，故移除
+from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow
 
 class ApplicationController:
     def __init__(self, root):
@@ -35,6 +33,7 @@ class ApplicationController:
         self.root.send_command_button.config(command=self.send_command)
         self.root.command_input.bind("<Return>", self.send_command)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.about_button.config(command=self.open_about_window)
         self.java_executable_path = "java"
         self.embedded_java_path = os.path.join(self.app_directory, "jdk-17", "bin", "java.exe")
         self.server_process = None
@@ -45,29 +44,29 @@ class ApplicationController:
             self.playit_executable_path = os.path.join(self.app_directory, "playit.exe")
         self.root.after(100, self.initialize)
     
+    def open_about_window(self):
+        AboutWindow(self.root)
+
     def start_playit_tunnel(self):
         if not os.path.exists(self.playit_executable_path):
             self.log("錯誤：找不到捆綁的 playit.exe 檔案！")
-            messagebox.showerror("內部錯誤", "找不到 playit.exe，請確認程式打包是否正確。")
+            messagebox.showerror("內部錯誤", "找不到 playit.exe，請確認程式打包是否正確，\n且已包含 playit.exe 檔案。")
             self.root.playit_enabled.set(False)
             return
 
         self.log("正在新視窗中啟動 Playit.gg...")
         self.root.playit_address_label.config(text="請查看彈出的視窗")
-
-        # --- 最終修改：在新視窗中獨立執行 playit.exe ---
-        # 不再捕捉輸出，讓它自己運行
         command = f'start "Playit.gg" "{self.playit_executable_path}"'
+        # --- 修正重點：移除此處的 creationflags ---
         self.playit_process = subprocess.Popen(command, shell=True)
 
     def stop_playit_tunnel(self):
-        # 因為 playit 在獨立視窗運行，我們嘗試用 Windows 命令來關閉它
-        # 這是一個比較強硬的方法，但能確保關聯性
         self.log("正在關閉 Playit.gg 通道...")
-        subprocess.run("taskkill /F /IM playit.exe /T", capture_output=True)
+        # --- 修正重點：移除此處的 creationflags ---
+        subprocess.run("taskkill /F /IM playit.exe /T", capture_output=True, text=True)
         self.playit_process = None
         self.root.playit_address_label.config(text="已中斷連線")
-
+        
     def get_application_path(self):
         if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)
         else: return os.path.dirname(os.path.abspath(__file__))
@@ -160,7 +159,7 @@ class ApplicationController:
         if not properties: messagebox.showinfo("提示", "找不到 server.properties 檔案。\n請先成功啟動一次伺服器以自動生成。"); return
         ServerSettingsWindow(self.root, properties, self.save_settings)
     def save_settings(self, new_properties):
-        try: self.server_manager.save_server_properties(new_properties); self.log("伺服器設定已儲存！"); messagebox.showinfo("成功", "伺服器設定已儲- 存！")
+        try: self.server_manager.save_server_properties(new_properties); self.log("伺服器設定已儲存！"); messagebox.showinfo("成功", "伺服器設定已儲存！")
         except Exception as e: messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
     def start_server(self):
         if self.root.playit_enabled.get(): self.start_playit_tunnel()
@@ -193,9 +192,14 @@ class ApplicationController:
             self.log("正在向伺服器發送 'stop' 指令..."); self.server_process.stdin.write("stop\n"); self.server_process.stdin.flush()
         else: messagebox.showinfo("提示", "伺服器未在運行中。")
     def on_closing(self):
+        if self.playit_process:
+            self.stop_playit_tunnel()
         if self.server_process and self.server_process.poll() is None:
-            if messagebox.askyesno("確認", "伺服器仍在運行中，確定要關閉嗎？"): self.stop_server(); self.root.after(3000, self.root.destroy)
-        else: self.root.destroy()
+            if messagebox.askyesno("確認", "伺服器仍在運行中，確定要關閉嗎？"): 
+                self.stop_server()
+                self.root.after(3000, self.root.destroy)
+        else:
+            self.root.destroy()
     def get_creation_flags(self): return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     def check_and_prepare_java(self):
         if os.path.exists(self.embedded_java_path): self.java_executable_path = self.embedded_java_path; self.log(f"偵測到內嵌 Java"); return
