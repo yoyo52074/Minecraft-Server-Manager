@@ -1,6 +1,5 @@
 # Minecraft 伺服器架設工具 - Produced by yoyo
 
-![應用程式截圖](https://i.imgur.com/gKFVm2N.png)
 
 歡迎使用！這是一個使用 Python 打造的 Minecraft 伺服器圖形化管理工具，致力於簡化 Minecraft Java 版伺服器的架設流程，讓任何人都能輕鬆地與朋友同樂。
 
