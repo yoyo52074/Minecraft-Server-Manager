@@ -9,7 +9,7 @@
 
 您可以隨時從我們的 **Releases 頁面**下載最新版本：
 
-**[➡️ 點此前往下載最新版 (v1.5)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
+**[➡️ 點此前往下載最新版 (v1.51)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
 
 ---
 
