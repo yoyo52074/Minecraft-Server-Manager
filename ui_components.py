@@ -8,7 +8,7 @@ import tkinter as std_tk
 class MainAppWindow(tk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器架設工具 -Produced by yoyo")
+        self.title("Minecraft 伺服器架設工具 v1.6 -Produced by yoyo")
 
         try:
             if getattr(sys, 'frozen', False):
@@ -21,102 +21,116 @@ class MainAppWindow(tk.Window):
         except Exception:
             pass
 
-        self.geometry("850x700")
-        self.minsize(800, 600)
+        self.geometry("900x750")
+        self.minsize(850, 650)
 
-        main_frame = ttk.Frame(self, padding="10")
+        main_frame = ttk.Frame(self, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         main_frame.rowconfigure(2, weight=1)
         main_frame.columnconfigure(0, weight=1)
 
         top_frame = ttk.Frame(main_frame)
-        top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         top_frame.columnconfigure(0, weight=1)
 
-        setup_frame = ttk.LabelFrame(top_frame, text="伺服器安裝與路徑", padding="10")
-        setup_frame.grid(row=0, column=0, sticky="ew")
+        setup_frame = ttk.LabelFrame(top_frame, text=" 伺服器安裝與路徑 ", padding="15")
+        setup_frame.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         setup_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(setup_frame, text="當前路徑:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
-        self.path_label = ttk.Label(setup_frame, text="...", anchor="w", style="info.TLabel")
-        self.path_label.grid(row=0, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
-        ttk.Label(setup_frame, text="伺服器核心:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.core_combo = ttk.Combobox(setup_frame, state="readonly")
-        self.core_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Label(setup_frame, text="Minecraft 版本:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.version_combo = ttk.Combobox(setup_frame, state="readonly")
-        self.version_combo.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(setup_frame, text="當前路徑:").grid(row=0, column=0, padx=5, pady=8, sticky="w")
+        self.path_label = ttk.Label(setup_frame, text="...", anchor="w", bootstyle="info")
+        self.path_label.grid(row=0, column=1, columnspan=2, padx=5, pady=8, sticky="ew")
+        
+        ttk.Label(setup_frame, text="伺服器核心:").grid(row=1, column=0, padx=5, pady=8, sticky="w")
+        self.core_combo = ttk.Combobox(setup_frame, state="readonly", font=("Segoe UI", 10))
+        self.core_combo.grid(row=1, column=1, padx=5, pady=8, sticky="ew")
+        
+        ttk.Label(setup_frame, text="Minecraft 版本:").grid(row=2, column=0, padx=5, pady=8, sticky="w")
+        self.version_combo = ttk.Combobox(setup_frame, state="readonly", font=("Segoe UI", 10))
+        self.version_combo.grid(row=2, column=1, padx=5, pady=8, sticky="ew")
 
         action_frame = ttk.Frame(top_frame)
-        action_frame.grid(row=0, column=1, sticky="ns", padx=(5, 0))
+        action_frame.grid(row=0, column=1, sticky="ns")
 
-        self.change_dir_button = ttk.Button(action_frame, text="更改伺服器路徑")
+        self.change_dir_button = ttk.Button(action_frame, text="📁 更改伺服器路徑", bootstyle="secondary")
         self.change_dir_button.pack(padx=5, pady=5, fill=tk.X)
-        self.download_button = ttk.Button(action_frame, text="下載/安裝伺服器", style="success.TButton")
+        self.download_button = ttk.Button(action_frame, text="✓ 下載/安裝伺服器", bootstyle="success")
         self.download_button.pack(padx=5, pady=5, fill=tk.X)
-        self.settings_button = ttk.Button(action_frame, text="伺服器設定", state="disabled")
+        self.settings_button = ttk.Button(action_frame, text="⚙ 伺服器設定", state="disabled", bootstyle="info")
         self.settings_button.pack(padx=5, pady=5, fill=tk.X)
-        self.about_button = ttk.Button(action_frame, text="關於", style="info.Outline.TButton")
+        self.about_button = ttk.Button(action_frame, text="ℹ 關於", bootstyle="secondary-outline")
         self.about_button.pack(padx=5, pady=5, fill=tk.X)
 
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        status_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
         
-        self.status_label = ttk.Label(status_frame, text="狀態：請選擇核心與版本")
-        self.status_label.pack(fill=tk.X)
+        self.status_label = ttk.Label(status_frame, text="狀態：請選擇核心與版本", font=("Segoe UI", 10, "bold"), bootstyle="warning")
+        self.status_label.pack(fill=tk.X, pady=(0, 5))
         
-        self.progress_bar = ttk.Progressbar(status_frame, orient="horizontal", mode="determinate")
-        self.progress_bar.pack(fill=tk.X, pady=5)
+        self.progress_bar = ttk.Progressbar(status_frame, orient="horizontal", mode="determinate", bootstyle="success-striped")
+        self.progress_bar.pack(fill=tk.X)
 
         console_area = ttk.Frame(main_frame)
         console_area.grid(row=2, column=0, sticky="nsew")
         console_area.rowconfigure(1, weight=1)
         console_area.columnconfigure(0, weight=1)
 
-        control_frame = ttk.LabelFrame(console_area, text="伺服器控制", padding="10")
-        control_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        control_frame = ttk.LabelFrame(console_area, text=" 伺服器控制 ", padding="15")
+        control_frame.grid(row=0, column=0, sticky="ew", pady=(0, 15))
 
         server_buttons_frame = ttk.Frame(control_frame)
         server_buttons_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        ttk.Label(server_buttons_frame, text="記憶體 (MB):").pack(side=tk.LEFT, padx=5)
-        self.ram_spinbox = ttk.Spinbox(server_buttons_frame, from_=1024, to=16384, increment=1024, width=10)
+        ttk.Label(server_buttons_frame, text="記憶體 (MB):").pack(side=tk.LEFT, padx=(0, 5))
+        self.ram_spinbox = ttk.Spinbox(server_buttons_frame, from_=1024, to=16384, increment=1024, width=8, font=("Segoe UI", 10))
         self.ram_spinbox.set("2048")
         self.ram_spinbox.pack(side=tk.LEFT, padx=5)
-        self.start_button = ttk.Button(server_buttons_frame, text="▶ 啟動伺服器", state="disabled", style="primary.TButton")
-        self.start_button.pack(side=tk.LEFT, padx=5)
-        self.stop_button = ttk.Button(server_buttons_frame, text="■ 停止伺服器", state="disabled", style="danger.TButton")
+        
+        self.start_button = ttk.Button(server_buttons_frame, text="▶ 啟動伺服器", state="disabled", bootstyle="primary")
+        self.start_button.pack(side=tk.LEFT, padx=10)
+        self.stop_button = ttk.Button(server_buttons_frame, text="■ 停止伺服器", state="disabled", bootstyle="danger")
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
-        playit_frame = ttk.LabelFrame(control_frame, text="公開IP (Playit.gg)", padding=(10, 5))
-        playit_frame.pack(side=tk.RIGHT, padx=(10, 0))
+        playit_frame = ttk.Frame(control_frame)
+        playit_frame.pack(side=tk.RIGHT, padx=5)
+        ttk.Label(playit_frame, text="公開IP (Playit.gg):").pack(side=tk.LEFT, padx=5)
+        
         self.playit_enabled = tk.BooleanVar()
-        self.playit_checkbox = ttk.Checkbutton(playit_frame, text="啟用", variable=self.playit_enabled)
-        self.playit_checkbox.pack(side=tk.LEFT)
-        self.playit_address_label = ttk.Label(playit_frame, text="伺服器啟動後顯示", style="info.TLabel")
+        self.playit_checkbox = ttk.Checkbutton(playit_frame, text="", variable=self.playit_enabled, bootstyle="success-round-toggle")
+        self.playit_checkbox.pack(side=tk.LEFT, padx=5)
+        
+        self.playit_address_label = ttk.Label(playit_frame, text="等待啟動...", bootstyle="secondary")
         self.playit_address_label.pack(side=tk.LEFT, padx=5)
 
-        console_frame = ttk.LabelFrame(console_area, text="伺服器控制台", padding="10")
+        console_frame = ttk.LabelFrame(console_area, text=" 伺服器控制台 ", padding="10")
         console_frame.grid(row=1, column=0, sticky="nsew")
         console_frame.rowconfigure(0, weight=1)
         console_frame.columnconfigure(0, weight=1)
-        self.console_output = scrolledtext.ScrolledText(console_frame, wrap=tk.WORD, state="disabled")
+        
+        self.console_output = scrolledtext.ScrolledText(console_frame, wrap=tk.WORD, state="disabled", font=("Consolas", 10), bg="#1e1e1e", fg="#ffffff")
         self.console_output.grid(row=0, column=0, sticky="nsew")
+        
+        self.console_output.tag_config("info", foreground="#5bc0de")
+        self.console_output.tag_config("warn", foreground="#f0ad4e")
+        self.console_output.tag_config("error", foreground="#d9534f")
+        self.console_output.tag_config("success", foreground="#5cb85c")
+        self.console_output.tag_config("normal", foreground="#ffffff")
 
         command_frame = ttk.Frame(console_area)
-        command_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        command_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         command_frame.columnconfigure(0, weight=1)
-        self.command_input = ttk.Entry(command_frame, state="disabled")
-        self.command_input.grid(row=0, column=0, sticky="ew")
-        self.send_command_button = ttk.Button(command_frame, text="發送指令", state="disabled")
-        self.send_command_button.grid(row=0, column=1, padx=(5, 0))
+        
+        self.command_input = ttk.Entry(command_frame, state="disabled", font=("Consolas", 11))
+        self.command_input.grid(row=0, column=0, sticky="ew", ipady=3)
+        self.send_command_button = ttk.Button(command_frame, text="✉ 發送", state="disabled", bootstyle="primary")
+        self.send_command_button.grid(row=0, column=1, padx=(10, 0))
 
 class ServerSettingsWindow(tk.Toplevel):
     def __init__(self, parent, properties_dict, save_callback):
         super().__init__(parent)
-        self.title("伺服器設定 (server.properties)")
-        self.geometry("600x700")
+        self.title("⚙ 伺服器設定 (server.properties)")
+        self.geometry("650x700")
         self.transient(parent)
         self.grab_set()
 
@@ -135,9 +149,12 @@ class ServerSettingsWindow(tk.Toplevel):
         self.properties = properties_dict
         self.entries = {}
 
-        self.canvas = tk.Canvas(self, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = ttk.Frame(self.canvas, padding=10)
+        main_frame = ttk.Frame(self, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(main_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas, padding="10")
         self.scrollable_frame.columnconfigure(1, weight=1)
         
         self.scrollable_frame.bind(
@@ -189,10 +206,10 @@ class ServerSettingsWindow(tk.Toplevel):
                 self.create_entry(row, key, f"{key} (進階)")
             row += 1
 
-        button_frame = ttk.Frame(self)
-        button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
-        save_button = ttk.Button(button_frame, text="儲存並關閉", command=self.save_and_close, style="success.TButton")
-        save_button.pack()
+        button_frame = ttk.Frame(self, padding="10")
+        button_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        save_button = ttk.Button(button_frame, text="💾 儲存並關閉", command=self.save_and_close, bootstyle="success")
+        save_button.pack(pady=5)
 
     def bind_mouse_wheel(self):
         self.bind_all("<MouseWheel>", self._on_mouse_wheel)
@@ -218,27 +235,27 @@ class ServerSettingsWindow(tk.Toplevel):
         super().destroy()
 
     def create_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text)
-        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        entry = ttk.Entry(self.scrollable_frame)
+        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
+        entry = ttk.Entry(self.scrollable_frame, font=("Segoe UI", 10))
         entry.insert(0, self.properties.get(key, ""))
-        entry.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        entry.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
         self.entries[key] = entry
 
     def create_boolean_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text)
-        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        combo = ttk.Combobox(self.scrollable_frame, values=["true", "false"], state="readonly")
+        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
+        combo = ttk.Combobox(self.scrollable_frame, values=["true", "false"], state="readonly", font=("Segoe UI", 10))
         combo.set(self.properties.get(key, "true"))
-        combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        combo.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
         self.entries[key] = combo
 
     def create_combobox(self, row, key, label_text, values):
-        label = ttk.Label(self.scrollable_frame, text=label_text)
-        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        combo = ttk.Combobox(self.scrollable_frame, values=values, state="readonly")
+        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
+        combo = ttk.Combobox(self.scrollable_frame, values=values, state="readonly", font=("Segoe UI", 10))
         combo.set(self.properties.get(key, values[0]))
-        combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        combo.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
         self.entries[key] = combo
 
     def save_and_close(self):
@@ -279,7 +296,7 @@ class AboutWindow(std_tk.Toplevel):
         ver_frame = std_tk.Frame(main_frame)
         ver_frame.pack(fill="x", anchor="w")
         std_tk.Label(ver_frame, text="版本:").pack(side="left")
-        std_tk.Label(ver_frame, text=" v1.51", font=("Segoe UI", 9, "bold")).pack(side="left")
+        std_tk.Label(ver_frame, text=" v1.6", font=("Segoe UI", 9, "bold")).pack(side="left")
 
         ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=15)
 

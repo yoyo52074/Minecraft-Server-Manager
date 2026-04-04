@@ -8,7 +8,6 @@ import shutil
 import re
 import requests
 from tkinter import messagebox, filedialog
-import webbrowser
 
 import ttkbootstrap as tk
 from ttkbootstrap import ttk
@@ -44,23 +43,38 @@ class ApplicationController:
             self.playit_executable_path = os.path.join(self.app_directory, "playit.exe")
         self.root.after(100, self.initialize)
     
+    def start_indeterminate_progress(self, speed=10):
+        self.root.progress_bar.config(mode="indeterminate")
+        self.root.progress_bar.start(speed)
+
+    def stop_and_reset_progress(self, value=0):
+        self.root.progress_bar.stop()
+        self.root.progress_bar.config(mode="determinate")
+        self.root.progress_bar["value"] = value
+
+    def update_progress(self, value): 
+        if self.root.progress_bar.cget("mode") == "indeterminate":
+            self.root.progress_bar.stop()
+            self.root.progress_bar.config(mode="determinate")
+        self.root.progress_bar["value"] = value
+
     def open_about_window(self):
         AboutWindow(self.root)
 
     def start_playit_tunnel(self):
         if not os.path.exists(self.playit_executable_path):
-            self.log("錯誤：找不到捆綁的 playit.exe 檔案！")
+            self.log("錯誤：找不到捆綁的 playit.exe 檔案！", "error")
             messagebox.showerror("內部錯誤", "找不到 playit.exe，請確認程式打包是否正確，\n且已包含 playit.exe 檔案。")
             self.root.playit_enabled.set(False)
             return
 
-        self.log("正在新視窗中啟動 Playit.gg...")
+        self.log("正在新視窗中啟動 Playit.gg...", "info")
         self.root.playit_address_label.config(text="請查看彈出的視窗")
         command = f'start "Playit.gg" "{self.playit_executable_path}"'
         self.playit_process = subprocess.Popen(command, shell=True)
 
     def stop_playit_tunnel(self):
-        self.log("正在關閉 Playit.gg 通道...")
+        self.log("正在關閉 Playit.gg 通道...", "warn")
         subprocess.run("taskkill /F /IM playit.exe /T", capture_output=True, text=True)
         self.playit_process = None
         self.root.playit_address_label.config(text="已中斷連線")
@@ -70,7 +84,7 @@ class ApplicationController:
         else: return os.path.dirname(os.path.abspath(__file__))
 
     def initialize(self):
-        self.log("管理器啟動...")
+        self.log("管理器啟動...", "info")
         self.root.path_label.config(text=self.server_directory)
         self.check_and_prepare_java()
         self.populate_core_selector()
@@ -89,7 +103,7 @@ class ApplicationController:
     def change_server_directory(self):
         new_path = filedialog.askdirectory(title="請選擇新的伺服器檔案位置")
         if new_path:
-            self.log(f"伺服器路徑已更改為: {new_path}")
+            self.log(f"伺服器路徑已更改為: {new_path}", "success")
             self.server_directory = new_path
             config = self.load_config()
             config["server_path"] = new_path
@@ -102,25 +116,32 @@ class ApplicationController:
     def send_command(self, event=None):
         command = self.root.command_input.get()
         if command and self.server_process and self.server_process.poll() is None:
-            self.log(f"> {command}")
+            self.log(f"> {command}", "normal")
             try: 
                 self.server_process.stdin.write(command + "\n")
                 self.server_process.stdin.flush()
                 self.root.command_input.delete(0, "end")
             except Exception as e: 
-                self.log(f"發送指令失敗: {e}")
+                self.log(f"發送指令失敗: {e}", "error")
 
-    def log(self, message):
+    def log(self, message, tag_override=None):
         self.root.console_output.config(state="normal")
-        self.root.console_output.insert("end", message + "\n")
+        
+        tag = "normal"
+        if tag_override:
+            tag = tag_override
+        else:
+            if "INFO" in message: tag = "info"
+            elif "WARN" in message: tag = "warn"
+            elif "ERROR" in message or "Exception" in message: tag = "error"
+            elif "Done" in message or "✅" in message: tag = "success"
+
+        self.root.console_output.insert("end", message + "\n", tag)
         self.root.console_output.see("end")
         self.root.console_output.config(state="disabled")
 
     def set_status(self, message): 
         self.root.status_label.config(text=f"狀態：{message}")
-
-    def update_progress(self, value): 
-        self.root.progress_bar["value"] = value
 
     def populate_core_selector(self):
         cores = self.server_manager.get_available_cores()
@@ -133,9 +154,13 @@ class ApplicationController:
         selected_core = self.root.core_combo.get()
         self.set_status(f"正在獲取 {selected_core} 的版本列表...")
         self.root.version_combo.set("載入中...")
+        
+        self.start_indeterminate_progress()
+        
         def _fetch_versions():
             versions = self.server_manager.get_core_versions(selected_core)
             def _update_ui():
+                self.stop_and_reset_progress()
                 self.root.version_combo["values"] = versions
                 if versions:
                     if selected_core == "Paper": self.root.version_combo.set(versions[-1])
@@ -153,13 +178,29 @@ class ApplicationController:
         if not core or not version or "載入中" in version: 
             messagebox.showerror("錯誤", "請先選擇有效的伺服器核心與版本。")
             return
+            
+        existing_jars = [f for f in os.listdir(self.server_manager.server_directory) if f.endswith('.jar') and 'installer' not in f]
+        if existing_jars:
+            if not messagebox.askyesno("替換核心", f"偵測到資料夾內已有伺服器核心。\n如果你想升級或更換版本，程式將會自動刪除舊核心 ({existing_jars[0]}) 並下載新核心。\n\n(放心，你的地圖與設定檔不會受到影響)\n\n確定要繼續替換嗎？"):
+                return
+            for old_jar in existing_jars:
+                try:
+                    os.remove(os.path.join(self.server_manager.server_directory, old_jar))
+                except Exception as e:
+                    messagebox.showerror("錯誤", f"無法刪除舊核心: {e}\n請確認伺服器已經完全關閉！")
+                    return
+            self.log("已成功清理舊版本伺服器核心。", "warn")
+
         self.set_status(f"準備下載 {core} {version}...")
-        self.update_progress(0)
         self.root.download_button.config(state="disabled")
+        
+        self.start_indeterminate_progress()
+        
         def _download_worker():
             filepath, message = self.server_manager.download_server(core, version, self._progress_callback_from_thread)
             def _update_ui():
-                self.log(message)
+                self.stop_and_reset_progress(100 if filepath else 0)
+                self.log(message, "info")
                 self.set_status(message)
                 self.root.download_button.config(state="normal")
                 if filepath:
@@ -177,7 +218,7 @@ class ApplicationController:
 
     def handle_forge_installation(self, installer_path):
         self.set_status("Forge 需要安裝...")
-        self.log("請在彈出的 Forge 安裝程式中，點擊 'Install Server'。")
+        self.log("請在彈出的 Forge 安裝程式中，點擊 'Install Server'。", "warn")
         install_command = [self.java_executable_path, "-jar", installer_path]
         def _run_installer():
             try: 
@@ -193,18 +234,18 @@ class ApplicationController:
         eula_path = os.path.join(self.server_manager.server_directory, "eula.txt")
         try:
             with open(eula_path, "w") as f: f.write("eula=true\n")
-            self.log("EULA 同意完成！")
+            self.log("EULA 同意完成！", "success")
             self.set_status("伺服器準備就緒！")
             self.check_existing_server()
         except Exception as e: 
-            self.log(f"寫入 EULA 失敗: {e}")
+            self.log(f"寫入 EULA 失敗: {e}", "error")
 
     def check_existing_server(self):
         jar_files = [f for f in os.listdir(self.server_manager.server_directory) if f.endswith('.jar') and 'installer' not in f]
         eula_exists = os.path.exists(os.path.join(self.server_manager.server_directory, "eula.txt"))
         properties_exist = os.path.exists(self.server_manager.properties_path)
         if jar_files and eula_exists:
-            self.log(f"偵測到伺服器核心: {jar_files[0]}")
+            self.log(f"偵測到伺服器核心: {jar_files[0]}", "info")
             self.set_status("伺服器已就緒")
             self.root.start_button.config(state="normal")
             if properties_exist: 
@@ -224,7 +265,7 @@ class ApplicationController:
     def save_settings(self, new_properties):
         try: 
             self.server_manager.save_server_properties(new_properties)
-            self.log("伺服器設定已儲存！")
+            self.log("伺服器設定已儲存！", "success")
             messagebox.showinfo("成功", "伺服器設定已儲存！")
         except Exception as e: 
             messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
@@ -239,7 +280,10 @@ class ApplicationController:
         server_jar_path = os.path.join(self.server_manager.server_directory, jar_files[0])
         ram = self.root.ram_spinbox.get()
         java_command = [self.java_executable_path, f"-Xmx{ram}M", f"-Xms{ram}M", "-jar", server_jar_path, "nogui"]
-        self.log("---------- 伺服器正在啟動 ----------")
+        self.log("---------- 伺服器正在啟動 ----------", "info")
+        
+        self.start_indeterminate_progress(15)
+        
         self.server_process = subprocess.Popen(
             java_command, cwd=self.server_manager.server_directory, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, stdin=subprocess.PIPE, text=True,
@@ -250,21 +294,24 @@ class ApplicationController:
 
     def read_server_output(self):
         for line in iter(self.server_process.stdout.readline, ''):
-            self.log(line.strip())
-            if "Done" in line: 
+            clean_line = line.strip()
+            self.log(clean_line)
+            if "Done" in clean_line: 
                 self.root.after(0, self.server_started_ui_update)
-                self.root.after(0, lambda: self.log("\n========================================"))
-                self.root.after(0, lambda: self.log("        ✅ 伺服器已成功啟動並準備就緒！"))
-                self.root.after(0, lambda: self.log("========================================\n"))
+                self.root.after(0, lambda: self.log("\n========================================", "success"))
+                self.root.after(0, lambda: self.log("        ✅ 伺服器已成功啟動並準備就緒！", "success"))
+                self.root.after(0, lambda: self.log("========================================\n", "success"))
         self.root.after(0, self.server_stopped_ui_update)
 
     def server_started_ui_update(self):
+        self.stop_and_reset_progress(100)
         self.set_status("伺服器運行中！")
         self.root.settings_button.config(state="normal")
         self.root.command_input.config(state="normal")
         self.root.send_command_button.config(state="normal")
 
     def server_stopped_ui_update(self):
+        self.stop_and_reset_progress(0)
         self.set_status("伺服器已停止")
         self.root.start_button.config(state="normal")
         self.root.stop_button.config(state="disabled")
@@ -277,7 +324,7 @@ class ApplicationController:
         if self.root.playit_enabled.get(): 
             self.stop_playit_tunnel()
         if self.server_process and self.server_process.poll() is None:
-            self.log("正在向伺服器發送 'stop' 指令...")
+            self.log("正在向伺服器發送 'stop' 指令...", "warn")
             self.server_process.stdin.write("stop\n")
             self.server_process.stdin.flush()
         else: 
@@ -299,11 +346,11 @@ class ApplicationController:
     def check_and_prepare_java(self):
         if os.path.exists(self.embedded_java_path): 
             self.java_executable_path = self.embedded_java_path
-            self.log(f"偵測到內嵌 Java")
+            self.log(f"偵測到內嵌 Java", "success")
             return
         try: 
             subprocess.run(["java", "-version"], check=True, capture_output=True, text=True, creationflags=self.get_creation_flags())
-            self.log("偵測到系統 Java。")
+            self.log("偵測到系統 Java。", "success")
         except (FileNotFoundError, subprocess.CalledProcessError):
             if messagebox.askyesno("缺少 Java", "是否要自動下載 Java 17？"): 
                 self.download_java()
@@ -313,8 +360,11 @@ class ApplicationController:
             try:
                 java_url = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk"
                 zip_path = os.path.join(self.app_directory, "jdk-17-portable.zip")
-                self.log(f"正在下載 Java 17...")
+                
+                self.root.after(0, lambda: self.start_indeterminate_progress())
+                self.log(f"正在下載 Java 17...", "info")
                 self.root.after(0, lambda: self.set_status("正在下載 Java 17..."))
+                
                 with requests.get(java_url, stream=True, allow_redirects=True, timeout=30) as r:
                     r.raise_for_status()
                     total_size = int(r.headers.get('content-length', 0))
@@ -325,8 +375,12 @@ class ApplicationController:
                             bytes_downloaded += len(chunk)
                             if total_size > 0: 
                                 self.root.after(0, self.update_progress, (bytes_downloaded / total_size) * 100)
-                self.log("Java 下載完成...")
+                
+                self.log("Java 下載完成...", "success")
                 self.root.after(0, lambda: self.set_status("正在解壓縮 Java..."))
+                
+                self.root.after(0, lambda: self.start_indeterminate_progress())
+                
                 temp_extract_path = os.path.join(self.app_directory, "jdk_temp")
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref: 
                     zip_ref.extractall(temp_extract_path)
@@ -337,17 +391,25 @@ class ApplicationController:
                 shutil.move(extracted_folder, final_jdk_path)
                 os.remove(zip_path)
                 shutil.rmtree(temp_extract_path)
-                self.log("Java 環境已準備就緒！")
+                self.log("Java 環境已準備就緒！", "success")
                 self.root.after(0, lambda: self.set_status("Java 環境已準備就緒！"))
                 self.java_executable_path = self.embedded_java_path
             except Exception as e: 
-                self.log(f"下載 Java 失敗: {e}")
+                self.log(f"下載 Java 失敗: {e}", "error")
                 self.root.after(0, lambda: messagebox.showerror("錯誤", f"下載 Java 失敗: {e}"))
             finally: 
-                self.root.after(0, self.update_progress, 0)
+                self.root.after(0, lambda: self.stop_and_reset_progress(0))
         threading.Thread(target=_worker, daemon=True).start()
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            myappid = 'yoyo.mcserver.manager.v152' 
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     root = MainAppWindow()
     app = ApplicationController(root)
     root.mainloop()
