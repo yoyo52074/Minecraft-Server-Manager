@@ -3,7 +3,6 @@ from ttkbootstrap import ttk
 from tkinter import messagebox, scrolledtext
 import os
 import sys
-# 為了 AboutWindow，額外匯入標準的 tkinter
 import tkinter as std_tk
 
 class MainAppWindow(tk.Window):
@@ -19,8 +18,8 @@ class MainAppWindow(tk.Window):
             icon_path = os.path.join(base_path, "my_logo.ico")
             if os.path.exists(icon_path):
                 self.iconbitmap(icon_path)
-        except Exception as e:
-            print(f"設定圖示時發生錯誤: {e}")
+        except Exception:
+            pass
 
         self.geometry("850x700")
         self.minsize(800, 600)
@@ -63,8 +62,10 @@ class MainAppWindow(tk.Window):
 
         status_frame = ttk.Frame(main_frame)
         status_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        
         self.status_label = ttk.Label(status_frame, text="狀態：請選擇核心與版本")
         self.status_label.pack(fill=tk.X)
+        
         self.progress_bar = ttk.Progressbar(status_frame, orient="horizontal", mode="determinate")
         self.progress_bar.pack(fill=tk.X, pady=5)
 
@@ -114,51 +115,142 @@ class MainAppWindow(tk.Window):
 class ServerSettingsWindow(tk.Toplevel):
     def __init__(self, parent, properties_dict, save_callback):
         super().__init__(parent)
-        self.title("伺服器設定 (server.properties)"); self.geometry("600x700"); self.transient(parent); self.grab_set()
-        self.save_callback = save_callback; self.properties = properties_dict; self.entries = {}
-        canvas = tk.Canvas(self); scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = ttk.Frame(canvas, padding=10); self.scrollable_frame.columnconfigure(1, weight=1)
-        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw"); canvas.configure(yscrollcommand=scrollbar.set)
-        self.bind_mouse_wheel(canvas); canvas.pack(side="left", fill="both", expand=True); scrollbar.pack(side="right", fill="y")
-        self.create_entry(0, "motd", "伺服器名稱")
-        self.create_combobox(1, "gamemode", "遊戲模式", ["survival", "creative", "adventure", "spectator"])
-        self.create_combobox(2, "difficulty", "難度", ["peaceful", "easy", "normal", "hard"])
-        self.create_boolean_entry(3, "online-mode", "正版驗證")
-        self.create_entry(4, "max-players", "最大玩家數")
-        self.create_boolean_entry(5, "pvp", "玩家傷害 (PVP)")
-        self.create_boolean_entry(6, "allow-flight", "允許飛行")
-        self.create_entry(7, "server-port", "連接埠")
-        self.create_entry(8, "level-seed", "地圖種子碼")
-        button_frame = ttk.Frame(self); button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
-        save_button = ttk.Button(button_frame, text="儲存並關閉", command=self.save_and_close, style="success.TButton"); save_button.pack()
-    def bind_mouse_wheel(self, widget):
-        widget.bind_all("<MouseWheel>", self._on_mouse_wheel); widget.bind_all("<Button-4>", self._on_mouse_wheel); widget.bind_all("<Button-5>", self._on_mouse_wheel)
+        self.title("伺服器設定 (server.properties)")
+        self.geometry("600x700")
+        self.transient(parent)
+        self.grab_set()
+
+        try:
+            if getattr(sys, 'frozen', False):
+                base_path = sys._MEIPASS
+            else:
+                base_path = os.path.abspath(".")
+            icon_path = os.path.join(base_path, "my_logo.ico")
+            if os.path.exists(icon_path):
+                self.iconbitmap(default=icon_path)
+        except Exception:
+            pass
+
+        self.save_callback = save_callback
+        self.properties = properties_dict
+        self.entries = {}
+
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas, padding=10)
+        self.scrollable_frame.columnconfigure(1, weight=1)
+        
+        self.scrollable_frame.bind(
+            "<Configure>", 
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.bind_mouse_wheel()
+        
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.known_settings = {
+            "motd": ("伺服器名稱 (motd)", "entry"),
+            "gamemode": ("遊戲模式 (gamemode)", "combobox", ["survival", "creative", "adventure", "spectator"]),
+            "difficulty": ("難度 (difficulty)", "combobox", ["peaceful", "easy", "normal", "hard"]),
+            "online-mode": ("正版驗證 (online-mode)", "boolean"),
+            "max-players": ("最大玩家數 (max-players)", "entry"),
+            "pvp": ("玩家傷害 (pvp)", "boolean"),
+            "allow-flight": ("允許飛行 (allow-flight)", "boolean"),
+            "server-port": ("連接埠 (server-port)", "entry"),
+            "level-seed": ("地圖種子碼 (level-seed)", "entry"),
+            "view-distance": ("視距 (view-distance)", "entry"),
+            "server-ip": ("伺服器 IP (server-ip)", "entry"),
+            "white-list": ("白名單 (white-list)", "boolean"),
+            "hardcore": ("極限模式 (hardcore)", "boolean"),
+            "spawn-monsters": ("生成怪物 (spawn-monsters)", "boolean"),
+            "spawn-animals": ("生成動物 (spawn-animals)", "boolean"),
+            "spawn-npcs": ("生成村民 (spawn-npcs)", "boolean"),
+            "enable-command-block": ("啟用指令方塊 (enable-command-block)", "boolean")
+        }
+
+        row = 0
+        for key in self.properties.keys():
+            if key in self.known_settings:
+                info = self.known_settings[key]
+                label_text = info[0]
+                widget_type = info[1]
+                
+                if widget_type == "boolean":
+                    self.create_boolean_entry(row, key, label_text)
+                elif widget_type == "combobox":
+                    self.create_combobox(row, key, label_text, info[2])
+                else:
+                    self.create_entry(row, key, label_text)
+            else:
+                self.create_entry(row, key, f"{key} (進階)")
+            row += 1
+
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
+        save_button = ttk.Button(button_frame, text="儲存並關閉", command=self.save_and_close, style="success.TButton")
+        save_button.pack()
+
+    def bind_mouse_wheel(self):
+        self.bind_all("<MouseWheel>", self._on_mouse_wheel)
+        self.bind_all("<Button-4>", self._on_mouse_wheel)
+        self.bind_all("<Button-5>", self._on_mouse_wheel)
+
     def _on_mouse_wheel(self, event):
-        canvas = event.widget
-        if not isinstance(canvas, tk.Canvas): canvas = event.widget.winfo_toplevel().nametowidget("!serversettingswindow.!canvas")
-        if event.num == 5 or event.delta < 0: canvas.yview_scroll(1, "units")
-        elif event.num == 4 or event.delta > 0: canvas.yview_scroll(-1, "units")
+        if isinstance(event.widget, ttk.Combobox) or isinstance(event.widget, tk.Combobox):
+            return
+        if not self.winfo_exists():
+            return
+        if event.delta:
+            self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        elif event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+
+    def destroy(self):
+        self.unbind_all("<MouseWheel>")
+        self.unbind_all("<Button-4>")
+        self.unbind_all("<Button-5>")
+        super().destroy()
+
     def create_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text); label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        entry = ttk.Entry(self.scrollable_frame); entry.insert(0, self.properties.get(key, "")); entry.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
-        self.entries = entry
+        label = ttk.Label(self.scrollable_frame, text=label_text)
+        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        entry = ttk.Entry(self.scrollable_frame)
+        entry.insert(0, self.properties.get(key, ""))
+        entry.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        self.entries[key] = entry
+
     def create_boolean_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text); label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        combo = ttk.Combobox(self.scrollable_frame, values=["true", "false"], state="readonly"); combo.set(self.properties.get(key, "true")); combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
-        self.entries["key"] = combo
+        label = ttk.Label(self.scrollable_frame, text=label_text)
+        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        combo = ttk.Combobox(self.scrollable_frame, values=["true", "false"], state="readonly")
+        combo.set(self.properties.get(key, "true"))
+        combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        self.entries[key] = combo
+
     def create_combobox(self, row, key, label_text, values):
-        label = ttk.Label(self.scrollable_frame, text=label_text); label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
-        combo = ttk.Combobox(self.scrollable_frame, values=values, state="readonly"); combo.set(self.properties.get(key, values [0])); combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
-        self.entries["key"] = combo
+        label = ttk.Label(self.scrollable_frame, text=label_text)
+        label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        combo = ttk.Combobox(self.scrollable_frame, values=values, state="readonly")
+        combo.set(self.properties.get(key, values[0]))
+        combo.grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        self.entries[key] = combo
+
     def save_and_close(self):
-        updated_properties = {key: widget.get() for key, widget in self.entries.items()}; self.save_callback(updated_properties); self.destroy()
+        updated_properties = {key: widget.get() for key, widget in self.entries.items()}
+        self.save_callback(updated_properties)
+        self.destroy()
 
 class AboutWindow(std_tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("關於")
-        self.geometry("400x260") # 調整高度
+        self.geometry("400x200")
         self.transient(parent)
         self.grab_set()
         self.resizable(False, False)
@@ -171,8 +263,8 @@ class AboutWindow(std_tk.Toplevel):
             icon_path = os.path.join(base_path, "my_logo.ico")
             if os.path.exists(icon_path):
                 self.iconbitmap(default=icon_path)
-        except Exception as e:
-            print(f"設定關於視窗圖示時發生錯誤: {e}")
+        except Exception:
+            pass
 
         main_frame = std_tk.Frame(self, padx=20, pady=20)
         main_frame.pack(fill=std_tk.BOTH, expand=True)
@@ -187,14 +279,10 @@ class AboutWindow(std_tk.Toplevel):
         ver_frame = std_tk.Frame(main_frame)
         ver_frame.pack(fill="x", anchor="w")
         std_tk.Label(ver_frame, text="版本:").pack(side="left")
-        std_tk.Label(ver_frame, text=" v1.5", font=("Segoe UI", 9, "bold")).pack(side="left")
+        std_tk.Label(ver_frame, text=" v1.51", font=("Segoe UI", 9, "bold")).pack(side="left")
 
         ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=15)
 
-        std_tk.Label(main_frame, text="我們的伺服器", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        std_tk.Label(main_frame, text="IP: yoyotv.xyz").pack(anchor="w", pady=(5,0))
-
-        # 佔據剩餘空間的空白 Frame，將版權標籤推到底部
         std_tk.Frame(main_frame).pack(expand=True, fill='y')
 
         std_tk.Label(main_frame, text="©廢人伺服器 版權所有", fg="grey").pack(side="bottom")
