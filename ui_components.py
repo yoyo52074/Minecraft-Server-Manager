@@ -8,7 +8,7 @@ import tkinter as std_tk
 class MainAppWindow(tk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器架設工具 v1.6 -Produced by yoyo")
+        self.title("Minecraft 伺服器架設工具 v1.7 -Produced by yoyo")
 
         try:
             if getattr(sys, 'frozen', False):
@@ -41,11 +41,11 @@ class MainAppWindow(tk.Window):
         ttk.Label(setup_frame, text="當前路徑:").grid(row=0, column=0, padx=5, pady=8, sticky="w")
         self.path_label = ttk.Label(setup_frame, text="...", anchor="w", bootstyle="info")
         self.path_label.grid(row=0, column=1, columnspan=2, padx=5, pady=8, sticky="ew")
-        
+
         ttk.Label(setup_frame, text="伺服器核心:").grid(row=1, column=0, padx=5, pady=8, sticky="w")
         self.core_combo = ttk.Combobox(setup_frame, state="readonly", font=("Segoe UI", 10))
         self.core_combo.grid(row=1, column=1, padx=5, pady=8, sticky="ew")
-        
+
         ttk.Label(setup_frame, text="Minecraft 版本:").grid(row=2, column=0, padx=5, pady=8, sticky="w")
         self.version_combo = ttk.Combobox(setup_frame, state="readonly", font=("Segoe UI", 10))
         self.version_combo.grid(row=2, column=1, padx=5, pady=8, sticky="ew")
@@ -64,10 +64,10 @@ class MainAppWindow(tk.Window):
 
         status_frame = ttk.Frame(main_frame)
         status_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
-        
+
         self.status_label = ttk.Label(status_frame, text="狀態：請選擇核心與版本", font=("Segoe UI", 10, "bold"), bootstyle="warning")
         self.status_label.pack(fill=tk.X, pady=(0, 5))
-        
+
         self.progress_bar = ttk.Progressbar(status_frame, orient="horizontal", mode="determinate", bootstyle="success-striped")
         self.progress_bar.pack(fill=tk.X)
 
@@ -86,7 +86,7 @@ class MainAppWindow(tk.Window):
         self.ram_spinbox = ttk.Spinbox(server_buttons_frame, from_=1024, to=16384, increment=1024, width=8, font=("Segoe UI", 10))
         self.ram_spinbox.set("2048")
         self.ram_spinbox.pack(side=tk.LEFT, padx=5)
-        
+
         self.start_button = ttk.Button(server_buttons_frame, text="▶ 啟動伺服器", state="disabled", bootstyle="primary")
         self.start_button.pack(side=tk.LEFT, padx=10)
         self.stop_button = ttk.Button(server_buttons_frame, text="■ 停止伺服器", state="disabled", bootstyle="danger")
@@ -95,11 +95,11 @@ class MainAppWindow(tk.Window):
         playit_frame = ttk.Frame(control_frame)
         playit_frame.pack(side=tk.RIGHT, padx=5)
         ttk.Label(playit_frame, text="公開IP (Playit.gg):").pack(side=tk.LEFT, padx=5)
-        
+
         self.playit_enabled = tk.BooleanVar()
         self.playit_checkbox = ttk.Checkbutton(playit_frame, text="", variable=self.playit_enabled, bootstyle="success-round-toggle")
         self.playit_checkbox.pack(side=tk.LEFT, padx=5)
-        
+
         self.playit_address_label = ttk.Label(playit_frame, text="等待啟動...", bootstyle="secondary")
         self.playit_address_label.pack(side=tk.LEFT, padx=5)
 
@@ -107,10 +107,10 @@ class MainAppWindow(tk.Window):
         console_frame.grid(row=1, column=0, sticky="nsew")
         console_frame.rowconfigure(0, weight=1)
         console_frame.columnconfigure(0, weight=1)
-        
+
         self.console_output = scrolledtext.ScrolledText(console_frame, wrap=tk.WORD, state="disabled", font=("Consolas", 10), bg="#1e1e1e", fg="#ffffff")
         self.console_output.grid(row=0, column=0, sticky="nsew")
-        
+
         self.console_output.tag_config("info", foreground="#5bc0de")
         self.console_output.tag_config("warn", foreground="#f0ad4e")
         self.console_output.tag_config("error", foreground="#d9534f")
@@ -120,7 +120,7 @@ class MainAppWindow(tk.Window):
         command_frame = ttk.Frame(console_area)
         command_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         command_frame.columnconfigure(0, weight=1)
-        
+
         self.command_input = ttk.Entry(command_frame, state="disabled", font=("Consolas", 11))
         self.command_input.grid(row=0, column=0, sticky="ew", ipady=3)
         self.send_command_button = ttk.Button(command_frame, text="✉ 發送", state="disabled", bootstyle="primary")
@@ -156,16 +156,16 @@ class ServerSettingsWindow(tk.Toplevel):
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
         self.scrollable_frame = ttk.Frame(self.canvas, padding="10")
         self.scrollable_frame.columnconfigure(1, weight=1)
-        
+
         self.scrollable_frame.bind(
-            "<Configure>", 
+            "<Configure>",
             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         )
         self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=scrollbar.set)
-        
+
         self.bind_mouse_wheel()
-        
+
         self.canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
@@ -195,7 +195,7 @@ class ServerSettingsWindow(tk.Toplevel):
                 info = self.known_settings[key]
                 label_text = info[0]
                 widget_type = info[1]
-                
+
                 if widget_type == "boolean":
                     self.create_boolean_entry(row, key, label_text)
                 elif widget_type == "combobox":
@@ -296,7 +296,7 @@ class AboutWindow(std_tk.Toplevel):
         ver_frame = std_tk.Frame(main_frame)
         ver_frame.pack(fill="x", anchor="w")
         std_tk.Label(ver_frame, text="版本:").pack(side="left")
-        std_tk.Label(ver_frame, text=" v1.6", font=("Segoe UI", 9, "bold")).pack(side="left")
+        std_tk.Label(ver_frame, text=" v1.7", font=("Segoe UI", 9, "bold")).pack(side="left")
 
         ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=15)
 

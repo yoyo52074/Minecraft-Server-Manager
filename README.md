@@ -9,7 +9,7 @@
 
 您可以隨時從我們的 **Releases 頁面**下載最新版本：
 
-**[➡️ 點此前往下載最新版 (v1.6)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
+**[➡️ 點此前往下載最新版 (v1.7)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
 
 ---
 
@@ -25,6 +25,17 @@
 ---
 
 ## 🚀 如何執行 (How to Run)
+
+### 從原始碼執行
+
+請先安裝 Python 3.10 或更新版本，再執行：
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+完整變更請參閱 [CHANGELOG.md](CHANGELOG.md)。
 
 當您第一次執行程式時，可能會看到 Windows SmartScreen 的安全提示。這是正常的保護機制。
 
