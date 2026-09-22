@@ -1,5 +1,11 @@
 # 更新日誌
 
+## [v1.7.1] - 2026-09-23
+
+### 發布
+
+本版本新增 GitHub Actions Windows 建置流程，會使用 PyInstaller 自動產生單檔 GUI `.exe`，並將 `playit.exe`、程式圖示與 `ttkbootstrap` 資源一併打包至 GitHub Release。
+
 ## [v1.7] - 2026-09-23
 
 ### 修正

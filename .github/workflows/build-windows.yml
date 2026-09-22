@@ -1,0 +1,60 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt pyinstaller
+
+      - name: Build EXE
+        shell: pwsh
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name Minecraft-Server-Manager
+          --icon my_logo.ico
+          --add-binary "playit.exe;."
+          --collect-all ttkbootstrap
+          --hidden-import requests
+          main.py
+
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/Minecraft-Server-Manager.exe")) {
+            throw "EXE build output was not created"
+          }
+          Get-Item "dist/Minecraft-Server-Manager.exe" | Format-List Name,Length,FullName
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minecraft-Server-Manager-windows
+          path: dist/Minecraft-Server-Manager.exe
+          if-no-files-found: error
+
+      - name: Attach EXE to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Minecraft-Server-Manager.exe
+          name: ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          generate_release_notes: true
