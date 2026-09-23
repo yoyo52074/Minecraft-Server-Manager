@@ -9,9 +9,6 @@ import re
 import requests
 from tkinter import messagebox, filedialog
 
-import ttkbootstrap as tk
-from ttkbootstrap import ttk
-
 from server_manager import ServerManager
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow
 

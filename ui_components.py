@@ -1,11 +1,11 @@
-import ttkbootstrap as tk
-from ttkbootstrap import ttk
+import tkinter as tk
+import ttkbootstrap as ttk
 from tkinter import messagebox, scrolledtext
 import os
 import sys
 import tkinter as std_tk
 
-class MainAppWindow(tk.Window):
+class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
         self.title("Minecraft 伺服器架設工具 v1.7 -Produced by yoyo")
@@ -126,7 +126,7 @@ class MainAppWindow(tk.Window):
         self.send_command_button = ttk.Button(command_frame, text="✉ 發送", state="disabled", bootstyle="primary")
         self.send_command_button.grid(row=0, column=1, padx=(10, 0))
 
-class ServerSettingsWindow(tk.Toplevel):
+class ServerSettingsWindow(ttk.Toplevel):
     def __init__(self, parent, properties_dict, save_callback):
         super().__init__(parent)
         self.title("⚙ 伺服器設定 (server.properties)")
@@ -217,7 +217,7 @@ class ServerSettingsWindow(tk.Toplevel):
         self.bind_all("<Button-5>", self._on_mouse_wheel)
 
     def _on_mouse_wheel(self, event):
-        if isinstance(event.widget, ttk.Combobox) or isinstance(event.widget, tk.Combobox):
+        if isinstance(event.widget, ttk.Combobox):
             return
         if not self.winfo_exists():
             return

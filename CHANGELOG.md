@@ -1,5 +1,12 @@
 # 更新日誌
 
+## [v1.7.2] - 2026-09-23
+
+### 修正
+
+- 修正 Windows EXE 啟動時 `cannot import name 'ttk' from 'ttkbootstrap'` 的問題，改用 ttkbootstrap 2.x 的公開 API。
+- 更新 `ttkbootstrap` 最低版本要求至 2.0.0。
+
 ## [v1.7.1] - 2026-09-23
 
 ### 發布
