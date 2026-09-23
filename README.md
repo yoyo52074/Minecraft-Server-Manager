@@ -9,7 +9,7 @@
 
 您可以隨時從我們的 **Releases 頁面**下載最新版本：
 
-**[➡️ 點此前往下載最新版 (v2.0.1)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
+**[➡️ 點此前往下載最新版 (v2.1)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
 
 Windows 使用者可直接從 Release 下載 `Minecraft-Server-Manager.exe`，不需要另外安裝 Python。
 
@@ -27,6 +27,7 @@ Windows 使用者可直接從 Release 下載 `Minecraft-Server-Manager.exe`，�
 * **啟動前診斷**：啟動前檢查 Java、記憶體、EULA、核心檔案與連接埠。
 * **備份與還原**：支援世界、插件與伺服器設定的一鍵 ZIP 備份與安全還原。
 * **核心完整性驗證**：保存核心 metadata 並支援 SHA-256 校驗。
+* **深色專業介面**：使用側邊導覽列分離總覽、安裝、控制台與設定頁面。
 
 ---
 
