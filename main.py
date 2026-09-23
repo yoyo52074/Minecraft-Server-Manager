@@ -6,11 +6,15 @@ import json
 import zipfile
 import shutil
 import re
+import time
 import requests
 from tkinter import messagebox, filedialog
 
 from server_manager import ServerManager
-from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow
+from backup_manager import BackupManager
+from core_metadata import CoreMetadata
+from diagnostics import ServerDiagnostics
+from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, InstallWizard
 
 class ApplicationController:
     def __init__(self, root):
@@ -20,6 +24,9 @@ class ApplicationController:
         config = self.load_config()
         self.server_directory = config.get("server_path", os.path.join(self.app_directory, "server"))
         self.server_manager = ServerManager(self.server_directory)
+        self.backup_manager = BackupManager(self.server_directory)
+        self.core_metadata = CoreMetadata(self.server_directory)
+        self.diagnostics = ServerDiagnostics(self.server_directory)
         self.root.core_combo.bind("<<ComboboxSelected>>", self.on_core_selected)
         self.root.download_button.config(command=self.on_download_button_click)
         self.root.settings_button.config(command=self.open_settings_window)
@@ -30,11 +37,15 @@ class ApplicationController:
         self.root.command_input.bind("<Return>", self.send_command)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.about_button.config(command=self.open_about_window)
+        self.root.wizard_button.config(command=self.open_install_wizard)
+        self.root.backup_button.config(command=self.create_backup)
+        self.root.restore_button.config(command=self.restore_backup)
         self.java_executable_path = "java"
         self.embedded_java_path = os.path.join(self.app_directory, "jdk-17", "bin", "java.exe")
         self.java_major_version = 0
         self.server_process = None
         self.playit_process = None
+        self.server_started_at = None
         if getattr(sys, 'frozen', False):
             self.playit_executable_path = os.path.join(sys._MEIPASS, "playit.exe")
         else:
@@ -58,6 +69,39 @@ class ApplicationController:
 
     def open_about_window(self):
         AboutWindow(self.root)
+
+    def open_install_wizard(self):
+        InstallWizard(self.root, self.on_download_button_click)
+
+    def create_backup(self):
+        try:
+            archive_path = self.backup_manager.create_backup("manual")
+            self.log(f"備份已建立：{os.path.basename(archive_path)}", "success")
+            messagebox.showinfo("備份完成", f"備份已建立：\n{archive_path}")
+        except Exception as exc:
+            self.log(f"建立備份失敗：{exc}", "error")
+            messagebox.showerror("備份失敗", str(exc))
+
+    def restore_backup(self):
+        if self.server_process and self.server_process.poll() is None:
+            messagebox.showwarning("無法還原", "請先停止伺服器再還原備份。")
+            return
+        selected = filedialog.askopenfilename(
+            title="選擇要還原的備份",
+            initialdir=self.backup_manager.backup_directory,
+            filetypes=[("ZIP 備份", "*.zip")],
+        )
+        if not selected:
+            return
+        if not messagebox.askyesno("確認還原", "還原會覆蓋目前的世界與設定檔，確定繼續嗎？"):
+            return
+        try:
+            self.backup_manager.restore_backup(selected)
+            self.log(f"備份已還原：{os.path.basename(selected)}", "success")
+            self.check_existing_server()
+        except Exception as exc:
+            self.log(f"還原備份失敗：{exc}", "error")
+            messagebox.showerror("還原失敗", str(exc))
 
     def start_playit_tunnel(self):
         if not os.path.exists(self.playit_executable_path):
@@ -122,6 +166,9 @@ class ApplicationController:
             self.save_config(config)
             self.root.path_label.config(text=new_path)
             self.server_manager = ServerManager(new_path)
+            self.backup_manager = BackupManager(new_path)
+            self.core_metadata = CoreMetadata(new_path)
+            self.diagnostics = ServerDiagnostics(new_path)
             self.check_existing_server()
             messagebox.showinfo("成功", f"伺服器路徑已更新！")
 
@@ -153,7 +200,22 @@ class ApplicationController:
         self.root.console_output.config(state="disabled")
 
     def set_status(self, message):
-        self.root.status_label.config(text=f"狀態：{message}")
+        self.root.status_label.config(text=f"● {message}")
+
+    def update_server_info(self, core=None, version=None):
+        core = core or self.root.core_combo.get() or "尚未安裝"
+        version = version or self.root.version_combo.get() or "--"
+        self.root.server_info_label.config(text=f"核心：{core}\n版本：{version}")
+
+    def update_uptime(self):
+        if self.server_started_at and self.server_process and self.server_process.poll() is None:
+            elapsed = int(time.time() - self.server_started_at)
+            hours, remainder = divmod(elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            self.root.uptime_label.config(text=f"運行時間：{hours:02d}:{minutes:02d}:{seconds:02d}")
+            self.root.after(1000, self.update_uptime)
+        else:
+            self.root.uptime_label.config(text="運行時間：--")
 
     def populate_core_selector(self):
         cores = self.server_manager.get_available_cores()
@@ -164,6 +226,7 @@ class ApplicationController:
 
     def on_core_selected(self, event):
         selected_core = self.root.core_combo.get()
+        self.update_server_info(core=selected_core, version="載入中...")
         self.set_status(f"正在獲取 {selected_core} 的版本列表...")
         self.root.version_combo.set("載入中...")
 
@@ -181,6 +244,7 @@ class ApplicationController:
                 else:
                     self.root.version_combo.set("無可用版本")
                     self.set_status("獲取版本列表失敗")
+                self.update_server_info(core=selected_core, version=self.root.version_combo.get())
             self.root.after(0, _update_ui)
         threading.Thread(target=_fetch_versions, daemon=True).start()
 
@@ -194,6 +258,12 @@ class ApplicationController:
         existing_jars = self.get_server_jars()
         if existing_jars:
             if not messagebox.askyesno("替換核心", f"偵測到資料夾內已有伺服器核心。\n如果你想升級或更換版本，程式將會自動刪除舊核心 ({existing_jars[0]}) 並下載新核心。\n\n(放心，你的地圖與設定檔不會受到影響)\n\n確定要繼續替換嗎？"):
+                return
+            try:
+                backup_path = self.backup_manager.create_backup("before-core-update")
+                self.log(f"核心更新前備份已建立：{os.path.basename(backup_path)}", "success")
+            except Exception as exc:
+                messagebox.showerror("無法更新核心", f"建立更新前備份失敗：{exc}")
                 return
             self.log("將在新核心下載成功後清理舊版本核心。", "warn")
 
@@ -210,6 +280,16 @@ class ApplicationController:
                 self.set_status(message)
                 self.root.download_button.config(state="normal")
                 if filepath:
+                    try:
+                        self.core_metadata.save(
+                            core,
+                            version,
+                            os.path.basename(filepath),
+                            self.get_required_java_version(filepath),
+                            self.core_metadata.sha256(filepath),
+                        )
+                    except OSError as exc:
+                        self.log(f"保存核心資訊失敗：{exc}", "warn")
                     for old_jar in self.get_server_jars():
                         if os.path.abspath(old_jar) != os.path.abspath(filepath):
                             try:
@@ -248,6 +328,7 @@ class ApplicationController:
             with open(eula_path, "w") as f: f.write("eula=true\n")
             self.log("EULA 同意完成！", "success")
             self.set_status("伺服器準備就緒！")
+            self.update_server_info()
             self.check_existing_server()
         except Exception as e:
             self.log(f"寫入 EULA 失敗: {e}", "error")
@@ -259,6 +340,7 @@ class ApplicationController:
         if jar_files and eula_exists:
             self.log(f"偵測到伺服器核心: {jar_files[0]}", "info")
             self.set_status("伺服器已就緒")
+            self.update_server_info()
             self.root.start_button.config(state="normal")
             if properties_exist:
                 self.root.settings_button.config(state="normal")
@@ -266,6 +348,7 @@ class ApplicationController:
             self.root.start_button.config(state="disabled")
             self.root.settings_button.config(state="disabled")
             self.set_status("請先下載並安裝一個伺服器")
+            self.update_server_info()
 
     def get_server_jars(self):
         return [
@@ -308,7 +391,12 @@ class ApplicationController:
             messagebox.showerror("錯誤", "伺服器資料夾內有多個核心 .jar，請先保留要啟動的核心。")
             return
         server_jar_path = jar_files[0]
-        required_java = self.get_required_java_version(server_jar_path)
+        metadata = self.core_metadata.load()
+        required_java = int(metadata.get("java_required") or self.get_required_java_version(server_jar_path))
+        verified, verification_detail = self.core_metadata.verify(server_jar_path)
+        if not verified:
+            messagebox.showerror("核心校驗失敗", f"SHA-256 不相符：\n{verification_detail}\n請重新下載伺服器核心。")
+            return
         if not self.ensure_java_version(required_java):
             if messagebox.askyesno(
                 "需要更新 Java",
@@ -319,6 +407,20 @@ class ApplicationController:
             else:
                 self.set_status(f"需要 Java {required_java} 才能啟動")
             return
+        properties = self.server_manager.get_server_properties()
+        diagnostics = self.diagnostics.check(
+            self.java_major_version,
+            required_java,
+            server_jar_path,
+            self.root.ram_spinbox.get(),
+            properties.get("server-port", 25565),
+            self.server_process is not None and self.server_process.poll() is None,
+        )
+        if not diagnostics["ok"]:
+            messagebox.showerror("啟動前檢查失敗", "\n".join(diagnostics["errors"]))
+            return
+        for warning in diagnostics["warnings"]:
+            self.log(f"啟動警告：{warning}", "warn")
         if self.root.playit_enabled.get():
             self.start_playit_tunnel()
         ram = self.root.ram_spinbox.get()
@@ -347,8 +449,10 @@ class ApplicationController:
         self.root.after(0, self.server_stopped_ui_update)
 
     def server_started_ui_update(self):
+        self.server_started_at = time.time()
         self.stop_and_reset_progress(100)
         self.set_status("伺服器運行中！")
+        self.update_uptime()
         self.root.settings_button.config(state="normal")
         self.root.command_input.config(state="normal")
         self.root.send_command_button.config(state="normal")
@@ -361,6 +465,8 @@ class ApplicationController:
         self.root.command_input.delete(0, "end")
         self.root.command_input.config(state="disabled")
         self.root.send_command_button.config(state="disabled")
+        self.server_started_at = None
+        self.root.uptime_label.config(text="運行時間：--")
         self.server_process = None
 
     def stop_server(self):
@@ -390,8 +496,11 @@ class ApplicationController:
     def check_and_prepare_java(self):
         if self.ensure_java_version(17):
             self.log(f"偵測到 Java {self.java_major_version}", "success")
+            self.root.java_info_label.config(text=f"Java：{self.java_major_version}\n需求：依核心版本檢查")
         elif messagebox.askyesno("缺少 Java", "是否要自動下載 Java 17？"):
             self.download_java(17)
+        else:
+            self.root.java_info_label.config(text="Java：未偵測到\n需求：請安裝 Java")
 
     def get_java_major_version(self, executable):
         try:
@@ -484,6 +593,7 @@ class ApplicationController:
                 self.java_executable_path = os.path.join(final_jdk_path, "bin", "java.exe")
                 self.embedded_java_path = self.java_executable_path
                 self.java_major_version = java_major
+                self.root.after(0, self.root.java_info_label.config, {"text": f"Java：{java_major}\n狀態：已準備"})
                 if start_after:
                     self.root.after(0, self.start_server)
             except Exception as e:
