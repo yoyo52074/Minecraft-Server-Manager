@@ -32,6 +32,7 @@ class ApplicationController:
         self.root.about_button.config(command=self.open_about_window)
         self.java_executable_path = "java"
         self.embedded_java_path = os.path.join(self.app_directory, "jdk-17", "bin", "java.exe")
+        self.java_major_version = 0
         self.server_process = None
         self.playit_process = None
         if getattr(sys, 'frozen', False):
@@ -299,8 +300,6 @@ class ApplicationController:
             messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
 
     def start_server(self):
-        if self.root.playit_enabled.get():
-            self.start_playit_tunnel()
         jar_files = self.get_server_jars()
         if not jar_files:
             messagebox.showerror("錯誤", "找不到伺服器核心 .jar 檔案。")
@@ -309,6 +308,19 @@ class ApplicationController:
             messagebox.showerror("錯誤", "伺服器資料夾內有多個核心 .jar，請先保留要啟動的核心。")
             return
         server_jar_path = jar_files[0]
+        required_java = self.get_required_java_version(server_jar_path)
+        if not self.ensure_java_version(required_java):
+            if messagebox.askyesno(
+                "需要更新 Java",
+                f"此 Minecraft 版本需要 Java {required_java} 或更新版本。\n"
+                f"目前 Java 版本不足，是否要自動下載 Java {required_java}？",
+            ):
+                self.download_java(required_java, start_after=True)
+            else:
+                self.set_status(f"需要 Java {required_java} 才能啟動")
+            return
+        if self.root.playit_enabled.get():
+            self.start_playit_tunnel()
         ram = self.root.ram_spinbox.get()
         java_command = [self.java_executable_path, f"-Xmx{ram}M", f"-Xms{ram}M", "-jar", server_jar_path, "nogui"]
         self.log("---------- 伺服器正在啟動 ----------", "info")
@@ -376,26 +388,70 @@ class ApplicationController:
         return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
     def check_and_prepare_java(self):
-        if os.path.exists(self.embedded_java_path):
-            self.java_executable_path = self.embedded_java_path
-            self.log(f"偵測到內嵌 Java", "success")
-            return
-        try:
-            subprocess.run(["java", "-version"], check=True, capture_output=True, text=True, creationflags=self.get_creation_flags())
-            self.log("偵測到系統 Java。", "success")
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            if messagebox.askyesno("缺少 Java", "是否要自動下載 Java 17？"):
-                self.download_java()
+        if self.ensure_java_version(17):
+            self.log(f"偵測到 Java {self.java_major_version}", "success")
+        elif messagebox.askyesno("缺少 Java", "是否要自動下載 Java 17？"):
+            self.download_java(17)
 
-    def download_java(self):
+    def get_java_major_version(self, executable):
+        try:
+            result = subprocess.run(
+                [executable, "-version"], capture_output=True, text=True,
+                creationflags=self.get_creation_flags(), check=True,
+            )
+            output = f"{result.stdout}\n{result.stderr}"
+            match = re.search(r'version\s+"(\d+)', output)
+            if not match:
+                match = re.search(r'openjdk\s+(\d+)', output)
+            return int(match.group(1)) if match else 0
+        except (FileNotFoundError, subprocess.CalledProcessError, OSError, ValueError):
+            return 0
+
+    def ensure_java_version(self, required_version):
+        candidates = [
+            os.path.join(self.app_directory, f"jdk-{required_version}", "bin", "java.exe"),
+            os.path.join(self.app_directory, f"jdk-{required_version}", "bin", "java"),
+            self.java_executable_path,
+            "java",
+        ]
+        checked = set()
+        for executable in candidates:
+            if executable in checked:
+                continue
+            checked.add(executable)
+            if executable != "java" and not os.path.exists(executable):
+                continue
+            major = self.get_java_major_version(executable)
+            if major >= required_version:
+                self.java_executable_path = executable
+                self.java_major_version = major
+                self.embedded_java_path = executable if executable != "java" else self.embedded_java_path
+                return True
+        return False
+
+    def get_required_java_version(self, server_jar_path):
+        name = os.path.basename(server_jar_path)
+        versions = re.findall(r"(?<!\d)(\d+)(?:\.(\d+))?(?:\.(\d+))?(?!\d)", name)
+        if not versions:
+            return 17
+        major, minor, patch = (int(value) if value else 0 for value in versions[-1])
+        if major >= 26 and minor >= 1:
+            return 25
+        if major == 1 and minor >= 21:
+            return 21
+        if major == 1 and minor == 20 and patch >= 5:
+            return 21
+        return 17
+
+    def download_java(self, java_major=17, start_after=False):
         def _worker():
             try:
-                java_url = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk"
-                zip_path = os.path.join(self.app_directory, "jdk-17-portable.zip")
+                java_url = f"https://api.adoptium.net/v3/binary/latest/{java_major}/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk"
+                zip_path = os.path.join(self.app_directory, f"jdk-{java_major}-portable.zip")
 
                 self.root.after(0, lambda: self.start_indeterminate_progress())
-                self.root.after(0, self.log, "正在下載 Java 17...", "info")
-                self.root.after(0, lambda: self.set_status("正在下載 Java 17..."))
+                self.root.after(0, self.log, f"正在下載 Java {java_major}...", "info")
+                self.root.after(0, lambda: self.set_status(f"正在下載 Java {java_major}..."))
 
                 with requests.get(java_url, stream=True, allow_redirects=True, timeout=30) as r:
                     r.raise_for_status()
@@ -417,7 +473,7 @@ class ApplicationController:
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(temp_extract_path)
                 extracted_folder = os.path.join(temp_extract_path, os.listdir(temp_extract_path)[0])
-                final_jdk_path = os.path.join(self.app_directory, "jdk-17")
+                final_jdk_path = os.path.join(self.app_directory, f"jdk-{java_major}")
                 if os.path.exists(final_jdk_path):
                     shutil.rmtree(final_jdk_path)
                 shutil.move(extracted_folder, final_jdk_path)
@@ -425,7 +481,11 @@ class ApplicationController:
                 shutil.rmtree(temp_extract_path)
                 self.root.after(0, self.log, "Java 環境已準備就緒！", "success")
                 self.root.after(0, lambda: self.set_status("Java 環境已準備就緒！"))
-                self.java_executable_path = self.embedded_java_path
+                self.java_executable_path = os.path.join(final_jdk_path, "bin", "java.exe")
+                self.embedded_java_path = self.java_executable_path
+                self.java_major_version = java_major
+                if start_after:
+                    self.root.after(0, self.start_server)
             except Exception as e:
                 self.root.after(0, self.log, f"下載 Java 失敗: {e}", "error")
                 self.root.after(0, lambda: messagebox.showerror("錯誤", f"下載 Java 失敗: {e}"))
