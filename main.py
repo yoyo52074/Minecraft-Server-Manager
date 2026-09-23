@@ -142,7 +142,7 @@ class ApplicationController:
     def initialize(self):
         self.log("管理器啟動...", "info")
         self.root.path_label.config(text=self.server_directory)
-        self.check_and_prepare_java()
+        self.detect_available_java()
         self.populate_core_selector()
         self.check_existing_server()
 
@@ -285,7 +285,7 @@ class ApplicationController:
                             core,
                             version,
                             os.path.basename(filepath),
-                            self.get_required_java_version(filepath),
+                            self.get_required_java_version_for_version(version),
                             self.core_metadata.sha256(filepath),
                         )
                     except OSError as exc:
@@ -392,7 +392,10 @@ class ApplicationController:
             return
         server_jar_path = jar_files[0]
         metadata = self.core_metadata.load()
-        required_java = int(metadata.get("java_required") or self.get_required_java_version(server_jar_path))
+        metadata_version = metadata.get("minecraft_version")
+        required_java = self.get_required_java_version_for_version(metadata_version) if metadata_version else self.get_required_java_version(server_jar_path)
+        if metadata_version and required_java < int(metadata.get("java_required") or 0):
+            required_java = int(metadata["java_required"])
         verified, verification_detail = self.core_metadata.verify(server_jar_path)
         if not verified:
             messagebox.showerror("核心校驗失敗", f"SHA-256 不相符：\n{verification_detail}\n請重新下載伺服器核心。")
@@ -493,14 +496,12 @@ class ApplicationController:
     def get_creation_flags(self):
         return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
-    def check_and_prepare_java(self):
+    def detect_available_java(self):
         if self.ensure_java_version(17):
             self.log(f"偵測到 Java {self.java_major_version}", "success")
             self.root.java_info_label.config(text=f"Java：{self.java_major_version}\n需求：依核心版本檢查")
-        elif messagebox.askyesno("缺少 Java", "是否要自動下載 Java 17？"):
-            self.download_java(17)
         else:
-            self.root.java_info_label.config(text="Java：未偵測到\n需求：請安裝 Java")
+            self.root.java_info_label.config(text="Java：尚未安裝\n需求：啟動時自動判斷")
 
     def get_java_major_version(self, executable):
         try:
@@ -540,10 +541,18 @@ class ApplicationController:
 
     def get_required_java_version(self, server_jar_path):
         name = os.path.basename(server_jar_path)
-        versions = re.findall(r"(?<!\d)(\d+)(?:\.(\d+))?(?:\.(\d+))?(?!\d)", name)
+        versions = re.findall(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)", name)
         if not versions:
             return 17
-        major, minor, patch = (int(value) if value else 0 for value in versions[-1])
+        return self.get_required_java_version_for_version(versions[0])
+
+    def get_required_java_version_for_version(self, version):
+        if not version:
+            return 17
+        numbers = [int(value) for value in re.findall(r"\d+", str(version))[:3]]
+        major = numbers[0] if numbers else 0
+        minor = numbers[1] if len(numbers) > 1 else 0
+        patch = numbers[2] if len(numbers) > 2 else 0
         if major >= 26 and minor >= 1:
             return 25
         if major == 1 and minor >= 21:

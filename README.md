@@ -9,7 +9,7 @@
 
 您可以隨時從我們的 **Releases 頁面**下載最新版本：
 
-**[➡️ 點此前往下載最新版 (v2.0)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
+**[➡️ 點此前往下載最新版 (v2.0.1)](https://github.com/yoyo52074/Minecraft-Server-Manager/releases/latest)**
 
 Windows 使用者可直接從 Release 下載 `Minecraft-Server-Manager.exe`，不需要另外安裝 Python。
 

@@ -8,7 +8,7 @@ import tkinter as std_tk
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器架設工具 v1.8 -Produced by yoyo")
+        self.title("Minecraft 伺服器架設工具 v2.0.1 -Produced by yoyo")
 
         try:
             if getattr(sys, 'frozen', False):
@@ -333,7 +333,7 @@ class AboutWindow(std_tk.Toplevel):
         ver_frame = std_tk.Frame(main_frame)
         ver_frame.pack(fill="x", anchor="w")
         std_tk.Label(ver_frame, text="版本:").pack(side="left")
-        std_tk.Label(ver_frame, text=" v1.8", font=("Segoe UI", 9, "bold")).pack(side="left")
+        std_tk.Label(ver_frame, text=" v2.0.1", font=("Segoe UI", 9, "bold")).pack(side="left")
 
         ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=15)
 
