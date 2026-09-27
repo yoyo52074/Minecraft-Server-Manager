@@ -4,6 +4,24 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
 import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+
+
+# Aternos-inspired color scheme
+COLORS = {
+    "bg_dark": "#1a1a1a",
+    "bg_card": "#252525",
+    "bg_hover": "#2d2d2d",
+    "accent": "#2196F3",
+    "accent_hover": "#1976D2",
+    "text_primary": "#ffffff",
+    "text_secondary": "#a0a0a0",
+    "border": "#333333",
+    "success": "#4CAF50",
+    "danger": "#f44336",
+    "warning": "#ff9800",
+    "info": "#2196F3",
+}
 
 
 class MainAppWindow(ttk.Window):
@@ -15,8 +33,13 @@ class MainAppWindow(ttk.Window):
         self._pages = {}
         self._nav_buttons = {}
 
+        # Apply custom dark theme colors
+        self.configure(background=COLORS["bg_dark"])
+
         try:
-            base_path = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+            base_path = (
+                sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+            )
             icon_path = os.path.join(base_path, "my_logo.ico")
             if os.path.exists(icon_path):
                 self.iconbitmap(icon_path)
@@ -31,46 +54,108 @@ class MainAppWindow(ttk.Window):
         self._show_page("overview")
 
     def _build_shell(self):
-        self.sidebar = ttk.Frame(self, bootstyle="dark", padding=(16, 20))
+        # Sidebar with Aternos-style dark theme
+        self.sidebar = tk.Frame(self, bg=COLORS["bg_card"], width=220)
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        self.sidebar.configure(width=220)
         self.sidebar.pack_propagate(False)
 
-        brand = ttk.Frame(self.sidebar, bootstyle="dark")
-        brand.pack(fill=tk.X, pady=(0, 28))
-        ttk.Label(brand, text="MINECRAFT", font=("Segoe UI", 15, "bold"), bootstyle="success-inverse").pack(anchor="w")
-        ttk.Label(brand, text="SERVER MANAGER", font=("Segoe UI", 9), bootstyle="secondary-inverse").pack(anchor="w")
-        ttk.Separator(self.sidebar).pack(fill=tk.X, pady=(0, 18))
+        # Brand header
+        brand = tk.Frame(self.sidebar, bg=COLORS["bg_card"])
+        brand.pack(fill=tk.X, padx=20, pady=(24, 20))
+        tk.Label(
+            brand,
+            text="MINECRAFT",
+            font=("Segoe UI", 16, "bold"),
+            fg=COLORS["text_primary"],
+            bg=COLORS["bg_card"],
+        ).pack(anchor="w")
+        tk.Label(
+            brand,
+            text="SERVER MANAGER",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).pack(anchor="w")
 
+        # Separator
+        tk.Frame(self.sidebar, height=1, bg=COLORS["border"]).pack(
+            fill=tk.X, padx=16, pady=(0, 16)
+        )
+
+        # Navigation buttons
         self._add_nav("overview", "▣ 伺服器總覽")
         self._add_nav("install", "＋ 安裝伺服器")
         self._add_nav("console", "▤ 控制台")
         self._add_nav("settings", "⚙ 伺服器設定")
 
-        ttk.Separator(self.sidebar).pack(fill=tk.X, pady=18)
-        self.backup_button = ttk.Button(self.sidebar, text="💾 建立備份", bootstyle="secondary-outline")
-        self.backup_button.pack(fill=tk.X, pady=4)
-        self.restore_button = ttk.Button(self.sidebar, text="↩ 還原備份", bootstyle="secondary-outline")
-        self.restore_button.pack(fill=tk.X, pady=4)
-        self.about_button = ttk.Button(self.sidebar, text="ℹ 關於", bootstyle="secondary-outline")
-        self.about_button.pack(fill=tk.X, pady=4)
+        # Separator
+        tk.Frame(self.sidebar, height=1, bg=COLORS["border"]).pack(
+            fill=tk.X, padx=16, pady=16
+        )
 
-        self.path_label = ttk.Label(self.sidebar, text="", wraplength=185, justify=tk.LEFT, bootstyle="secondary-inverse")
-        self.path_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(20, 0))
-        ttk.Label(self.sidebar, text="伺服器路徑", bootstyle="secondary-inverse", font=("Segoe UI", 8)).pack(side=tk.BOTTOM, anchor="w")
+        # Action buttons
+        self.backup_button = self._create_sidebar_button("💾 建立備份")
+        self.backup_button.pack(fill=tk.X, padx=16, pady=3)
+        self.restore_button = self._create_sidebar_button("↩ 還原備份")
+        self.restore_button.pack(fill=tk.X, padx=16, pady=3)
+        self.about_button = self._create_sidebar_button("ℹ 關於")
+        self.about_button.pack(fill=tk.X, padx=16, pady=3)
 
-        self.content = ttk.Frame(self, padding=(24, 20))
-        self.content.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        # Server path at bottom
+        path_frame = tk.Frame(self.sidebar, bg=COLORS["bg_card"])
+        path_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(0, 20))
+        tk.Label(
+            path_frame,
+            text="伺服器路徑",
+            font=("Segoe UI", 8),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).pack(anchor="w")
+        self.path_label = tk.Label(
+            path_frame,
+            text="",
+            wraplength=180,
+            justify=tk.LEFT,
+            font=("Segoe UI", 8),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        )
+        self.path_label.pack(anchor="w", pady=(4, 0))
+
+        # Main content area
+        self.content = tk.Frame(self, bg=COLORS["bg_dark"])
+        self.content.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=24, pady=20)
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
 
+    def _create_sidebar_button(self, text):
+        """Create a styled sidebar button with hover effects."""
+        btn = tk.Button(
+            self.sidebar,
+            text=text,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            activeforeground=COLORS["text_primary"],
+            activebackground=COLORS["bg_hover"],
+            bd=0,
+            padx=12,
+            pady=8,
+            anchor="w",
+            cursor="hand2",
+        )
+        btn.bind("<Enter>", lambda e: btn.configure(bg=COLORS["bg_hover"]))
+        btn.bind("<Leave>", lambda e: btn.configure(bg=COLORS["bg_card"]))
+        return btn
+
     def _add_nav(self, name, text):
-        button = ttk.Button(self.sidebar, text=text, command=lambda: self._show_page(name), bootstyle="dark-outline")
-        button.pack(fill=tk.X, pady=3)
+        button = self._create_sidebar_button(text)
+        button.configure(command=lambda: self._show_page(name))
+        button.pack(fill=tk.X, padx=16, pady=3)
         self._nav_buttons[name] = button
 
     def _new_page(self, name):
-        page = ttk.Frame(self.content)
+        page = tk.Frame(self.content, bg=COLORS["bg_dark"])
         page.grid(row=0, column=0, sticky="nsew")
         page.rowconfigure(1, weight=1)
         page.columnconfigure(0, weight=1)
@@ -82,109 +167,354 @@ class MainAppWindow(ttk.Window):
         if page:
             page.tkraise()
         for key, button in self._nav_buttons.items():
-            button.configure(bootstyle="success" if key == name else "dark-outline")
+            if key == name:
+                button.configure(fg=COLORS["accent"], bg=COLORS["bg_hover"])
+            else:
+                button.configure(fg=COLORS["text_secondary"], bg=COLORS["bg_card"])
 
     def _page_header(self, page, title, subtitle):
-        header = ttk.Frame(page)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 18))
-        ttk.Label(header, text=title, font=("Segoe UI", 22, "bold"), bootstyle="light").pack(anchor="w")
-        ttk.Label(header, text=subtitle, font=("Segoe UI", 10), bootstyle="secondary").pack(anchor="w", pady=(3, 0))
+        header = tk.Frame(page, bg=COLORS["bg_dark"])
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        tk.Label(
+            header,
+            text=title,
+            font=("Segoe UI", 24, "bold"),
+            fg=COLORS["text_primary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text=subtitle,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w", pady=(4, 0))
+
+    def _create_card(self, parent, title=None):
+        """Create a styled card frame with optional title."""
+        card = tk.Frame(
+            parent,
+            bg=COLORS["bg_card"],
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+        )
+        if title:
+            title_frame = tk.Frame(card, bg=COLORS["bg_card"])
+            title_frame.pack(fill=tk.X, padx=16, pady=(12, 0))
+            tk.Label(
+                title_frame,
+                text=title,
+                font=("Segoe UI", 11, "bold"),
+                fg=COLORS["text_primary"],
+                bg=COLORS["bg_card"],
+            ).pack(anchor="w")
+        inner = tk.Frame(card, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
+        return card, inner
 
     def _build_overview_page(self):
         page = self._new_page("overview")
         self._page_header(page, "伺服器總覽", "管理狀態、啟動伺服器與查看最近活動")
-        body = ttk.Frame(page)
+        body = tk.Frame(page, bg=COLORS["bg_dark"])
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=2)
         body.rowconfigure(1, weight=1)
 
-        status_card = ttk.LabelFrame(body, text=" 目前狀態 ", padding=18, bootstyle="success")
+        # Status card
+        status_card, status_inner = self._create_card(body, "目前狀態")
         status_card.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
-        status_card.columnconfigure(0, weight=1)
-        status_card.columnconfigure(1, weight=1)
-        status_card.columnconfigure(2, weight=1)
-        self.status_label = ttk.Label(status_card, text="● 尚未準備", font=("Segoe UI", 17, "bold"), bootstyle="warning")
+        status_inner.columnconfigure(0, weight=1)
+        status_inner.columnconfigure(1, weight=1)
+        status_inner.columnconfigure(2, weight=1)
+
+        self.status_label = tk.Label(
+            status_inner,
+            text="● 尚未準備",
+            font=("Segoe UI", 17, "bold"),
+            fg=COLORS["warning"],
+            bg=COLORS["bg_card"],
+        )
         self.status_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
-        self.server_info_label = ttk.Label(status_card, text="核心：尚未安裝\n版本：--", font=("Segoe UI", 10), bootstyle="secondary")
+        self.server_info_label = tk.Label(
+            status_inner,
+            text="核心：尚未安裝\n版本：--",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            justify=tk.LEFT,
+        )
         self.server_info_label.grid(row=1, column=0, sticky="w")
-        self.java_info_label = ttk.Label(status_card, text="Java：檢查中...\n需求：--", font=("Segoe UI", 10), bootstyle="secondary")
+        self.java_info_label = tk.Label(
+            status_inner,
+            text="Java：檢查中...\n需求：--",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            justify=tk.LEFT,
+        )
         self.java_info_label.grid(row=1, column=1, sticky="w")
-        self.uptime_label = ttk.Label(status_card, text="運行時間：--", font=("Segoe UI", 10), bootstyle="secondary")
+        self.uptime_label = tk.Label(
+            status_inner,
+            text="運行時間：--",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        )
         self.uptime_label.grid(row=1, column=2, sticky="e")
-        self.progress_bar = ttk.Progressbar(status_card, orient="horizontal", mode="determinate", bootstyle="success-striped")
+        self.progress_bar = ttk.Progressbar(
+            status_inner, orient="horizontal", mode="determinate", bootstyle="info"
+        )
         self.progress_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(16, 0))
 
-        control_card = ttk.LabelFrame(body, text=" 快速操作 ", padding=16)
+        # Control card
+        control_card, control_inner = self._create_card(body, "快速操作")
         control_card.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        control_card.columnconfigure(0, weight=1)
-        control_card.columnconfigure(1, weight=1)
-        ttk.Label(control_card, text="記憶體配置 (MB)").grid(row=0, column=0, sticky="w", pady=(0, 5))
-        self.ram_spinbox = ttk.Spinbox(control_card, from_=1024, to=16384, increment=1024, width=12, font=("Segoe UI", 11))
+        control_inner.columnconfigure(0, weight=1)
+        control_inner.columnconfigure(1, weight=1)
+
+        tk.Label(
+            control_inner,
+            text="記憶體配置 (MB)",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        self.ram_spinbox = ttk.Spinbox(
+            control_inner,
+            from_=1024,
+            to=16384,
+            increment=1024,
+            width=12,
+            font=("Segoe UI", 11),
+        )
         self.ram_spinbox.set("2048")
         self.ram_spinbox.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 18))
-        self.start_button = ttk.Button(control_card, text="▶  啟動伺服器", state="disabled", bootstyle="success")
+
+        self.start_button = self._create_button(
+            control_inner, "▶  啟動伺服器", COLORS["success"], state="disabled"
+        )
         self.start_button.grid(row=1, column=1, sticky="ew", pady=(0, 18))
-        self.stop_button = ttk.Button(control_card, text="■  停止伺服器", state="disabled", bootstyle="danger")
+        self.stop_button = self._create_button(
+            control_inner, "■  停止伺服器", COLORS["danger"], state="disabled"
+        )
         self.stop_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
 
-        playit_card = ttk.LabelFrame(body, text=" Playit.gg 公開連線 ", padding=16)
+        # Playit card
+        playit_card, playit_inner = self._create_card(body, "Playit.gg 公開連線")
         playit_card.grid(row=1, column=1, sticky="nsew")
+
         self.playit_enabled = tk.BooleanVar()
-        self.playit_checkbox = ttk.Checkbutton(playit_card, text="啟用公開連線", variable=self.playit_enabled, bootstyle="success-round-toggle")
+        self.playit_checkbox = ttk.Checkbutton(
+            playit_inner,
+            text="啟用公開連線",
+            variable=self.playit_enabled,
+            bootstyle="info-round-toggle",
+        )
         self.playit_checkbox.pack(anchor="w", pady=(0, 14))
-        self.playit_address_label = ttk.Label(playit_card, text="○ 尚未啟動\n請在啟動伺服器時開啟", justify=tk.LEFT, bootstyle="secondary")
+        self.playit_address_label = tk.Label(
+            playit_inner,
+            text="○ 尚未啟動\n請在啟動伺服器時開啟",
+            justify=tk.LEFT,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        )
         self.playit_address_label.pack(anchor="w")
+
+    def _create_button(self, parent, text, color, state="normal"):
+        """Create a styled button with the given color."""
+        btn = tk.Button(
+            parent,
+            text=text,
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg=color,
+            activebackground=color,
+            activeforeground="#ffffff",
+            bd=0,
+            padx=16,
+            pady=8,
+            cursor="hand2",
+            state=state,
+        )
+        # Hover effect
+        hover_color = self._darken_color(color)
+        btn.bind(
+            "<Enter>",
+            lambda e: (
+                btn.configure(bg=hover_color)
+                if str(btn["state"]) != "disabled"
+                else None
+            ),
+        )
+        btn.bind(
+            "<Leave>",
+            lambda e: (
+                btn.configure(bg=color) if str(btn["state"]) != "disabled" else None
+            ),
+        )
+        return btn
+
+    def _darken_color(self, color):
+        """Darken a hex color by 20%."""
+        color = color.lstrip("#")
+        r, g, b = tuple(int(color[i : i + 2], 16) for i in (0, 2, 4))
+        r, g, b = int(r * 0.8), int(g * 0.8), int(b * 0.8)
+        return f"#{r:02x}{g:02x}{b:02x}"
 
     def _build_install_page(self):
         page = self._new_page("install")
-        self._page_header(page, "安裝伺服器", "選擇核心與版本，系統會自動準備 Java、下載核心並設定 EULA")
-        card = ttk.LabelFrame(page, text=" 安裝設定 ", padding=20)
+        self._page_header(
+            page,
+            "安裝伺服器",
+            "選擇核心與版本，系統會自動準備 Java、下載核心並設定 EULA",
+        )
+        card, card_inner = self._create_card(page, "安裝設定")
         card.grid(row=1, column=0, sticky="new")
-        card.columnconfigure(1, weight=1)
-        ttk.Label(card, text="步驟 1  伺服器核心", font=("Segoe UI", 10, "bold"), bootstyle="success").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Label(card, text="核心類型").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
-        self.core_combo = ttk.Combobox(card, state="readonly", font=("Segoe UI", 10))
+        card_inner.columnconfigure(1, weight=1)
+
+        tk.Label(
+            card_inner,
+            text="步驟 1  伺服器核心",
+            font=("Segoe UI", 10, "bold"),
+            fg=COLORS["accent"],
+            bg=COLORS["bg_card"],
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        tk.Label(
+            card_inner,
+            text="核心類型",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.core_combo = ttk.Combobox(
+            card_inner, state="readonly", font=("Segoe UI", 10)
+        )
         self.core_combo.grid(row=1, column=1, sticky="ew", pady=7)
-        ttk.Label(card, text="Minecraft 版本").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=7)
-        self.version_combo = ttk.Combobox(card, state="readonly", font=("Segoe UI", 10))
+
+        tk.Label(
+            card_inner,
+            text="Minecraft 版本",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.version_combo = ttk.Combobox(
+            card_inner, state="readonly", font=("Segoe UI", 10)
+        )
         self.version_combo.grid(row=2, column=1, sticky="ew", pady=7)
-        ttk.Separator(card).grid(row=3, column=0, columnspan=2, sticky="ew", pady=16)
-        ttk.Label(card, text="步驟 2  安裝位置", font=("Segoe UI", 10, "bold"), bootstyle="success").grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        self.change_dir_button = ttk.Button(card, text="📁 更改伺服器路徑", bootstyle="secondary")
+
+        tk.Frame(card_inner, height=1, bg=COLORS["border"]).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=16
+        )
+
+        tk.Label(
+            card_inner,
+            text="步驟 2  安裝位置",
+            font=("Segoe UI", 10, "bold"),
+            fg=COLORS["accent"],
+            bg=COLORS["bg_card"],
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.change_dir_button = self._create_button(
+            card_inner, "📁 更改伺服器路徑", COLORS["bg_hover"]
+        )
+        self.change_dir_button.configure(fg=COLORS["text_primary"])
         self.change_dir_button.grid(row=5, column=0, sticky="ew", pady=7)
-        self.download_button = ttk.Button(card, text="✓ 下載 / 安裝伺服器", bootstyle="success")
+
+        self.download_button = self._create_button(
+            card_inner, "✓ 下載 / 安裝伺服器", COLORS["accent"]
+        )
         self.download_button.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=7)
-        self.wizard_button = ttk.Button(card, text="🧭 開啟安裝精靈", bootstyle="primary-outline")
-        self.wizard_button.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        ttk.Label(card, text="Java 版本會在按下安裝或啟動時依 Minecraft 版本自動判斷。", bootstyle="secondary").grid(row=7, column=0, columnspan=2, sticky="w", pady=(16, 0))
+
+        self.wizard_button = self._create_button(
+            card_inner, "🧭 開啟安裝精靈", COLORS["bg_hover"]
+        )
+        self.wizard_button.configure(fg=COLORS["accent"])
+        self.wizard_button.grid(
+            row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+
+        tk.Label(
+            card_inner,
+            text="Java 版本會在按下安裝或啟動時依 Minecraft 版本自動判斷。",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(16, 0))
 
     def _build_console_page(self):
         page = self._new_page("console")
         self._page_header(page, "伺服器控制台", "查看即時輸出並傳送伺服器指令")
         page.rowconfigure(1, weight=1)
-        console_card = ttk.LabelFrame(page, text=" 即時輸出 ", padding=10)
+
+        console_card, console_inner = self._create_card(page, "即時輸出")
         console_card.grid(row=1, column=0, sticky="nsew")
-        console_card.rowconfigure(0, weight=1)
-        console_card.columnconfigure(0, weight=1)
-        self.console_output = scrolledtext.ScrolledText(console_card, wrap=tk.WORD, state="disabled", font=("Consolas", 10), bg="#15191e", fg="#e8edf2", insertbackground="white")
+        console_inner.rowconfigure(0, weight=1)
+        console_inner.columnconfigure(0, weight=1)
+
+        self.console_output = scrolledtext.ScrolledText(
+            console_inner,
+            wrap=tk.WORD,
+            state="disabled",
+            font=("Consolas", 10),
+            bg=COLORS["bg_dark"],
+            fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            bd=0,
+            padx=12,
+            pady=12,
+        )
         self.console_output.grid(row=0, column=0, sticky="nsew")
-        for tag, color in {"info": "#5bc0de", "warn": "#f0ad4e", "error": "#d9534f", "success": "#5cb85c", "normal": "#e8edf2"}.items():
+        for tag, color in {
+            "info": COLORS["info"],
+            "warn": COLORS["warning"],
+            "error": COLORS["danger"],
+            "success": COLORS["success"],
+            "normal": COLORS["text_primary"],
+        }.items():
             self.console_output.tag_config(tag, foreground=color)
-        command_frame = ttk.Frame(page)
+
+        command_frame = tk.Frame(page, bg=COLORS["bg_dark"])
         command_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         command_frame.columnconfigure(0, weight=1)
-        self.command_input = ttk.Entry(command_frame, state="disabled", font=("Consolas", 11))
-        self.command_input.grid(row=0, column=0, sticky="ew", ipady=5)
-        self.send_command_button = ttk.Button(command_frame, text="✉ 發送", state="disabled", bootstyle="primary")
-        self.send_command_button.grid(row=0, column=1, padx=(10, 0))
+
+        self.command_input = tk.Entry(
+            command_frame,
+            state="disabled",
+            font=("Consolas", 11),
+            bg=COLORS["bg_card"],
+            fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            bd=1,
+            relief=tk.SOLID,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+        )
+        self.command_input.grid(row=0, column=0, sticky="ew", ipady=8, padx=(0, 10))
+        self.send_command_button = self._create_button(
+            command_frame, "✉ 發送", COLORS["accent"], state="disabled"
+        )
+        self.send_command_button.grid(row=0, column=1)
 
     def _build_settings_page(self):
         page = self._new_page("settings")
-        self._page_header(page, "伺服器設定", "編輯 server.properties；伺服器首次啟動後可用")
-        self.settings_button = ttk.Button(page, text="⚙ 開啟設定編輯器", state="disabled", bootstyle="info")
+        self._page_header(
+            page, "伺服器設定", "編輯 server.properties；伺服器首次啟動後可用"
+        )
+        self.settings_button = self._create_button(
+            page, "⚙ 開啟設定編輯器", COLORS["accent"], state="disabled"
+        )
         self.settings_button.grid(row=1, column=0, sticky="w")
-        ttk.Label(page, text="設定視窗內提供搜尋功能，可快速找到 MOTD、模式、連接埠與白名單等項目。", bootstyle="secondary").grid(row=2, column=0, sticky="w", pady=(14, 0))
+        tk.Label(
+            page,
+            text="設定視窗內提供搜尋功能，可快速找到 MOTD、模式、連接埠與白名單等項目。",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).grid(row=2, column=0, sticky="w", pady=(14, 0))
 
 
 class ServerSettingsWindow(ttk.Toplevel):
@@ -192,6 +522,7 @@ class ServerSettingsWindow(ttk.Toplevel):
         super().__init__(parent)
         self.title("伺服器設定")
         self.geometry("700x760")
+        self.configure(bg=COLORS["bg_dark"])
         self.transient(parent)
         self.grab_set()
         self.save_callback = save_callback
@@ -199,20 +530,42 @@ class ServerSettingsWindow(ttk.Toplevel):
         self.entries = {}
         self.setting_rows = {}
 
-        main_frame = ttk.Frame(self, padding="15")
+        main_frame = tk.Frame(self, bg=COLORS["bg_dark"], padx=15, pady=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        search_frame = ttk.Frame(main_frame)
+
+        search_frame = tk.Frame(main_frame, bg=COLORS["bg_dark"])
         search_frame.pack(fill="x", pady=(0, 8))
-        ttk.Label(search_frame, text="搜尋設定：").pack(side="left", padx=(0, 8))
+        tk.Label(
+            search_frame,
+            text="搜尋設定：",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).pack(side="left", padx=(0, 8))
         self.search_var = tk.StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_var).pack(side="left", fill="x", expand=True)
+        search_entry = tk.Entry(
+            search_frame,
+            textvariable=self.search_var,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_card"],
+            fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            bd=1,
+            relief=tk.SOLID,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+        )
+        search_entry.pack(side="left", fill="x", expand=True, ipady=4)
         self.search_var.trace_add("write", lambda *_: self.filter_settings())
 
-        canvas = tk.Canvas(main_frame, highlightthickness=0)
+        canvas = tk.Canvas(main_frame, bg=COLORS["bg_dark"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = ttk.Frame(canvas, padding="10")
+        self.scrollable_frame = tk.Frame(canvas, bg=COLORS["bg_dark"], padx=10, pady=10)
         self.scrollable_frame.columnconfigure(1, weight=1)
-        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        self.scrollable_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
         canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
@@ -222,8 +575,16 @@ class ServerSettingsWindow(ttk.Toplevel):
 
         self.known_settings = {
             "motd": ("伺服器名稱 (motd)", "entry"),
-            "gamemode": ("遊戲模式 (gamemode)", "combobox", ["survival", "creative", "adventure", "spectator"]),
-            "difficulty": ("難度 (difficulty)", "combobox", ["peaceful", "easy", "normal", "hard"]),
+            "gamemode": (
+                "遊戲模式 (gamemode)",
+                "combobox",
+                ["survival", "creative", "adventure", "spectator"],
+            ),
+            "difficulty": (
+                "難度 (difficulty)",
+                "combobox",
+                ["peaceful", "easy", "normal", "hard"],
+            ),
             "online-mode": ("正版驗證 (online-mode)", "boolean"),
             "max-players": ("最大玩家數 (max-players)", "entry"),
             "pvp": ("玩家傷害 (pvp)", "boolean"),
@@ -248,7 +609,21 @@ class ServerSettingsWindow(ttk.Toplevel):
             else:
                 self.create_entry(row, key, info[0] if info else f"{key} (進階)")
 
-        ttk.Button(self, text="💾 儲存並關閉", command=self.save_and_close, bootstyle="success").pack(fill=tk.X, padx=15, pady=10)
+        save_btn = tk.Button(
+            self,
+            text="💾 儲存並關閉",
+            command=self.save_and_close,
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg=COLORS["accent"],
+            activebackground=COLORS["accent_hover"],
+            activeforeground="#ffffff",
+            bd=0,
+            padx=16,
+            pady=10,
+            cursor="hand2",
+        )
+        save_btn.pack(fill=tk.X, padx=15, pady=10)
 
     def bind_mouse_wheel(self):
         self.bind_all("<MouseWheel>", self._on_mouse_wheel)
@@ -272,27 +647,66 @@ class ServerSettingsWindow(ttk.Toplevel):
         super().destroy()
 
     def create_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label = tk.Label(
+            self.scrollable_frame,
+            text=label_text,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        )
         label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
-        entry = ttk.Entry(self.scrollable_frame, font=("Segoe UI", 10))
+        entry = tk.Entry(
+            self.scrollable_frame,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_card"],
+            fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            bd=1,
+            relief=tk.SOLID,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["accent"],
+        )
         entry.insert(0, self.properties.get(key, ""))
-        entry.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
+        entry.grid(row=row, column=1, sticky="ew", padx=10, pady=8, ipady=4)
         self.entries[key] = entry
         self.setting_rows[key] = (label, entry, label_text.lower(), key.lower())
 
     def create_boolean_entry(self, row, key, label_text):
-        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label = tk.Label(
+            self.scrollable_frame,
+            text=label_text,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        )
         label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
-        combo = ttk.Combobox(self.scrollable_frame, values=["true", "false"], state="readonly", font=("Segoe UI", 10))
+        combo = ttk.Combobox(
+            self.scrollable_frame,
+            values=["true", "false"],
+            state="readonly",
+            font=("Segoe UI", 10),
+        )
         combo.set(self.properties.get(key, "true"))
         combo.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
         self.entries[key] = combo
         self.setting_rows[key] = (label, combo, label_text.lower(), key.lower())
 
     def create_combobox(self, row, key, label_text, values):
-        label = ttk.Label(self.scrollable_frame, text=label_text, font=("Segoe UI", 10))
+        label = tk.Label(
+            self.scrollable_frame,
+            text=label_text,
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        )
         label.grid(row=row, column=0, sticky="w", padx=10, pady=8)
-        combo = ttk.Combobox(self.scrollable_frame, values=values, state="readonly", font=("Segoe UI", 10))
+        combo = ttk.Combobox(
+            self.scrollable_frame,
+            values=values,
+            state="readonly",
+            font=("Segoe UI", 10),
+        )
         combo.set(self.properties.get(key, values[0]))
         combo.grid(row=row, column=1, sticky="ew", padx=10, pady=8)
         self.entries[key] = combo
@@ -320,15 +734,33 @@ class AboutWindow(tk.Toplevel):
         super().__init__(parent)
         self.title("關於")
         self.geometry("400x220")
+        self.configure(bg=COLORS["bg_dark"])
         self.transient(parent)
         self.grab_set()
-        ttk.Frame(self, padding=24).pack(fill=tk.BOTH, expand=True)
-        frame = ttk.Frame(self, padding=24)
+        frame = tk.Frame(self, bg=COLORS["bg_dark"], padx=24, pady=24)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="Minecraft 伺服器管理器", font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        ttk.Label(frame, text="版本：v2.1", bootstyle="secondary").pack(anchor="w", pady=(10, 0))
-        ttk.Separator(frame).pack(fill=tk.X, pady=15)
-        ttk.Label(frame, text="Produced by yoyo", bootstyle="secondary").pack(anchor="w")
+        tk.Label(
+            frame,
+            text="Minecraft 伺服器管理器",
+            font=("Segoe UI", 16, "bold"),
+            fg=COLORS["text_primary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w")
+        tk.Label(
+            frame,
+            text="版本：v2.1",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w", pady=(10, 0))
+        tk.Frame(frame, height=1, bg=COLORS["border"]).pack(fill=tk.X, pady=15)
+        tk.Label(
+            frame,
+            text="Produced by yoyo",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w")
 
 
 class InstallWizard(tk.Toplevel):
@@ -336,12 +768,53 @@ class InstallWizard(tk.Toplevel):
         super().__init__(parent)
         self.title("Minecraft 伺服器安裝精靈")
         self.geometry("500x390")
+        self.configure(bg=COLORS["bg_dark"])
         self.transient(parent)
         self.grab_set()
-        frame = ttk.Frame(self, padding=28)
+        frame = tk.Frame(self, bg=COLORS["bg_dark"], padx=28, pady=28)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="建立你的 Minecraft 伺服器", font=("Segoe UI", 17, "bold")).pack(anchor="w")
-        ttk.Label(frame, text="完成以下步驟後即可開始與朋友遊玩", bootstyle="secondary").pack(anchor="w", pady=(4, 20))
-        for index, text in enumerate(("選擇伺服器核心與 Minecraft 版本", "準備相容的 Java 環境", "下載核心並設定 EULA", "啟動伺服器或建立第一份備份"), 1):
-            ttk.Label(frame, text=f"{index}   {text}").pack(anchor="w", pady=6)
-        ttk.Button(frame, text="開始下載與安裝", bootstyle="success", command=lambda: (self.destroy(), start_callback())).pack(side="bottom", fill=tk.X, pady=(20, 0))
+        tk.Label(
+            frame,
+            text="建立你的 Minecraft 伺服器",
+            font=("Segoe UI", 17, "bold"),
+            fg=COLORS["text_primary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w")
+        tk.Label(
+            frame,
+            text="完成以下步驟後即可開始與朋友遊玩",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_dark"],
+        ).pack(anchor="w", pady=(4, 20))
+        for index, text in enumerate(
+            (
+                "選擇伺服器核心與 Minecraft 版本",
+                "準備相容的 Java 環境",
+                "下載核心並設定 EULA",
+                "啟動伺服器或建立第一份備份",
+            ),
+            1,
+        ):
+            tk.Label(
+                frame,
+                text=f"{index}   {text}",
+                font=("Segoe UI", 10),
+                fg=COLORS["text_secondary"],
+                bg=COLORS["bg_dark"],
+            ).pack(anchor="w", pady=6)
+        start_btn = tk.Button(
+            frame,
+            text="開始下載與安裝",
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg=COLORS["accent"],
+            activebackground=COLORS["accent_hover"],
+            activeforeground="#ffffff",
+            bd=0,
+            padx=16,
+            pady=10,
+            cursor="hand2",
+            command=lambda: (self.destroy(), start_callback()),
+        )
+        start_btn.pack(side="bottom", fill=tk.X, pady=(20, 0))
