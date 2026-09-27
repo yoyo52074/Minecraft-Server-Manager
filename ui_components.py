@@ -27,7 +27,7 @@ COLORS = {
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器管理器 v2.1 - Produced by yoyo")
+        self.title("Minecraft 伺服器管理器 v2.2 - Produced by yoyo")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self._pages = {}
@@ -48,7 +48,6 @@ class MainAppWindow(ttk.Window):
 
         self._build_shell()
         self._build_overview_page()
-        self._build_install_page()
         self._build_console_page()
         self._build_settings_page()
         self._show_page("overview")
@@ -84,7 +83,6 @@ class MainAppWindow(ttk.Window):
 
         # Navigation buttons
         self._add_nav("overview", "▣ 伺服器總覽")
-        self._add_nav("install", "＋ 安裝伺服器")
         self._add_nav("console", "▤ 控制台")
         self._add_nav("settings", "⚙ 伺服器設定")
 
@@ -98,6 +96,8 @@ class MainAppWindow(ttk.Window):
         self.backup_button.pack(fill=tk.X, padx=16, pady=3)
         self.restore_button = self._create_sidebar_button("↩ 還原備份")
         self.restore_button.pack(fill=tk.X, padx=16, pady=3)
+        self.change_dir_button = self._create_sidebar_button("📁 更改路徑")
+        self.change_dir_button.pack(fill=tk.X, padx=16, pady=3)
         self.about_button = self._create_sidebar_button("ℹ 關於")
         self.about_button.pack(fill=tk.X, padx=16, pady=3)
 
@@ -215,15 +215,17 @@ class MainAppWindow(ttk.Window):
 
     def _build_overview_page(self):
         page = self._new_page("overview")
-        self._page_header(page, "伺服器總覽", "管理狀態、啟動伺服器與查看最近活動")
+        self._page_header(
+            page, "伺服器總覽", "選擇核心版本，一鍵啟動你的 Minecraft 伺服器"
+        )
         body = tk.Frame(page, bg=COLORS["bg_dark"])
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=2)
-        body.rowconfigure(1, weight=1)
+        body.rowconfigure(2, weight=1)
 
-        # Status card
-        status_card, status_inner = self._create_card(body, "目前狀態")
+        # ── Status card ──
+        status_card, status_inner = self._create_card(body, "伺服器狀態")
         status_card.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 14))
         status_inner.columnconfigure(0, weight=1)
         status_inner.columnconfigure(1, weight=1)
@@ -236,53 +238,75 @@ class MainAppWindow(ttk.Window):
             fg=COLORS["warning"],
             bg=COLORS["bg_card"],
         )
-        self.status_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
-        self.server_info_label = tk.Label(
-            status_inner,
-            text="核心：尚未安裝\n版本：--",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-            justify=tk.LEFT,
-        )
-        self.server_info_label.grid(row=1, column=0, sticky="w")
-        self.java_info_label = tk.Label(
-            status_inner,
-            text="Java：檢查中...\n需求：--",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-            justify=tk.LEFT,
-        )
-        self.java_info_label.grid(row=1, column=1, sticky="w")
-        self.uptime_label = tk.Label(
-            status_inner,
-            text="運行時間：--",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-        )
-        self.uptime_label.grid(row=1, column=2, sticky="e")
-        self.progress_bar = ttk.Progressbar(
-            status_inner, orient="horizontal", mode="determinate", bootstyle="info"
-        )
-        self.progress_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        self.status_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        # Control card
-        control_card, control_inner = self._create_card(body, "快速操作")
-        control_card.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        control_inner.columnconfigure(0, weight=1)
-        control_inner.columnconfigure(1, weight=1)
+        # Progress row: bar + percentage
+        progress_frame = tk.Frame(status_inner, bg=COLORS["bg_card"])
+        progress_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        progress_frame.columnconfigure(0, weight=1)
+        self.progress_bar = ttk.Progressbar(
+            progress_frame, orient="horizontal", mode="determinate", bootstyle="info"
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self.progress_label = tk.Label(
+            progress_frame,
+            text="0%",
+            font=("Segoe UI", 11, "bold"),
+            fg=COLORS["accent"],
+            bg=COLORS["bg_card"],
+            width=5,
+            anchor="e",
+        )
+        self.progress_label.grid(row=0, column=1, sticky="e")
+
+        self.status_detail_label = tk.Label(
+            status_inner,
+            text="請選擇核心與版本後啟動伺服器",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            justify=tk.LEFT,
+        )
+        self.status_detail_label.grid(row=2, column=0, columnspan=3, sticky="w")
+
+        # ── Server setup card (core + version + RAM) ──
+        setup_card, setup_inner = self._create_card(body, "伺服器設定")
+        setup_card.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(0, 14))
+        setup_inner.columnconfigure(1, weight=1)
 
         tk.Label(
-            control_inner,
-            text="記憶體配置 (MB)",
-            font=("Segoe UI", 9),
+            setup_inner,
+            text="伺服器核心",
+            font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_card"],
-        ).grid(row=0, column=0, sticky="w", pady=(0, 5))
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.core_combo = ttk.Combobox(
+            setup_inner, state="readonly", font=("Segoe UI", 10)
+        )
+        self.core_combo.grid(row=0, column=1, sticky="ew", pady=7)
+
+        tk.Label(
+            setup_inner,
+            text="Minecraft 版本",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
+        self.version_combo = ttk.Combobox(
+            setup_inner, state="readonly", font=("Segoe UI", 10)
+        )
+        self.version_combo.grid(row=1, column=1, sticky="ew", pady=7)
+
+        tk.Label(
+            setup_inner,
+            text="記憶體 (MB)",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=7)
         self.ram_spinbox = ttk.Spinbox(
-            control_inner,
+            setup_inner,
             from_=1024,
             to=16384,
             increment=1024,
@@ -290,20 +314,60 @@ class MainAppWindow(ttk.Window):
             font=("Segoe UI", 11),
         )
         self.ram_spinbox.set("2048")
-        self.ram_spinbox.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 18))
+        self.ram_spinbox.grid(row=2, column=1, sticky="w", pady=7)
+
+        # ── Control buttons ──
+        control_card, control_inner = self._create_card(body, "快速操作")
+        control_card.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
+        control_inner.columnconfigure(0, weight=1)
+        control_inner.columnconfigure(1, weight=1)
 
         self.start_button = self._create_button(
             control_inner, "▶  啟動伺服器", COLORS["success"], state="disabled"
         )
-        self.start_button.grid(row=1, column=1, sticky="ew", pady=(0, 18))
+        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         self.stop_button = self._create_button(
             control_inner, "■  停止伺服器", COLORS["danger"], state="disabled"
         )
-        self.stop_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
+        self.stop_button.grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
-        # Playit card
+        # Info row inside control card
+        info_frame = tk.Frame(control_inner, bg=COLORS["bg_card"])
+        info_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        info_frame.columnconfigure(0, weight=1)
+        info_frame.columnconfigure(1, weight=1)
+        info_frame.columnconfigure(2, weight=1)
+
+        self.server_info_label = tk.Label(
+            info_frame,
+            text="核心：尚未安裝\n版本：--",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            justify=tk.LEFT,
+        )
+        self.server_info_label.grid(row=0, column=0, sticky="w")
+        self.java_info_label = tk.Label(
+            info_frame,
+            text="Java：檢查中...",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+            justify=tk.LEFT,
+        )
+        self.java_info_label.grid(row=0, column=1, sticky="w")
+        self.uptime_label = tk.Label(
+            info_frame,
+            text="運行時間：--",
+            font=("Segoe UI", 9),
+            fg=COLORS["text_secondary"],
+            bg=COLORS["bg_card"],
+        )
+        self.uptime_label.grid(row=0, column=2, sticky="e")
+
+        # ── Playit card ──
         playit_card, playit_inner = self._create_card(body, "Playit.gg 公開連線")
-        playit_card.grid(row=1, column=1, sticky="nsew")
+        playit_card.grid(row=2, column=1, sticky="nsew", pady=(0, 14))
 
         self.playit_enabled = tk.BooleanVar()
         self.playit_checkbox = ttk.Checkbutton(
@@ -363,86 +427,6 @@ class MainAppWindow(ttk.Window):
         r, g, b = tuple(int(color[i : i + 2], 16) for i in (0, 2, 4))
         r, g, b = int(r * 0.8), int(g * 0.8), int(b * 0.8)
         return f"#{r:02x}{g:02x}{b:02x}"
-
-    def _build_install_page(self):
-        page = self._new_page("install")
-        self._page_header(
-            page,
-            "安裝伺服器",
-            "選擇核心與版本，系統會自動準備 Java、下載核心並設定 EULA",
-        )
-        card, card_inner = self._create_card(page, "安裝設定")
-        card.grid(row=1, column=0, sticky="new")
-        card_inner.columnconfigure(1, weight=1)
-
-        tk.Label(
-            card_inner,
-            text="步驟 1  伺服器核心",
-            font=("Segoe UI", 10, "bold"),
-            fg=COLORS["accent"],
-            bg=COLORS["bg_card"],
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        tk.Label(
-            card_inner,
-            text="核心類型",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-        ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=7)
-        self.core_combo = ttk.Combobox(
-            card_inner, state="readonly", font=("Segoe UI", 10)
-        )
-        self.core_combo.grid(row=1, column=1, sticky="ew", pady=7)
-
-        tk.Label(
-            card_inner,
-            text="Minecraft 版本",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-        ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=7)
-        self.version_combo = ttk.Combobox(
-            card_inner, state="readonly", font=("Segoe UI", 10)
-        )
-        self.version_combo.grid(row=2, column=1, sticky="ew", pady=7)
-
-        tk.Frame(card_inner, height=1, bg=COLORS["border"]).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=16
-        )
-
-        tk.Label(
-            card_inner,
-            text="步驟 2  安裝位置",
-            font=("Segoe UI", 10, "bold"),
-            fg=COLORS["accent"],
-            bg=COLORS["bg_card"],
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        self.change_dir_button = self._create_button(
-            card_inner, "📁 更改伺服器路徑", COLORS["bg_hover"]
-        )
-        self.change_dir_button.configure(fg=COLORS["text_primary"])
-        self.change_dir_button.grid(row=5, column=0, sticky="ew", pady=7)
-
-        self.download_button = self._create_button(
-            card_inner, "✓ 下載 / 安裝伺服器", COLORS["accent"]
-        )
-        self.download_button.grid(row=5, column=1, sticky="ew", padx=(10, 0), pady=7)
-
-        self.wizard_button = self._create_button(
-            card_inner, "🧭 開啟安裝精靈", COLORS["bg_hover"]
-        )
-        self.wizard_button.configure(fg=COLORS["accent"])
-        self.wizard_button.grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=(12, 0)
-        )
-
-        tk.Label(
-            card_inner,
-            text="Java 版本會在按下安裝或啟動時依 Minecraft 版本自動判斷。",
-            font=("Segoe UI", 9),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(16, 0))
 
     def _build_console_page(self):
         page = self._new_page("console")
@@ -748,7 +732,7 @@ class AboutWindow(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text="版本：v2.1",
+            text="版本：v2.2",
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
@@ -761,60 +745,3 @@ class AboutWindow(tk.Toplevel):
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
         ).pack(anchor="w")
-
-
-class InstallWizard(tk.Toplevel):
-    def __init__(self, parent, start_callback):
-        super().__init__(parent)
-        self.title("Minecraft 伺服器安裝精靈")
-        self.geometry("500x390")
-        self.configure(bg=COLORS["bg_dark"])
-        self.transient(parent)
-        self.grab_set()
-        frame = tk.Frame(self, bg=COLORS["bg_dark"], padx=28, pady=28)
-        frame.pack(fill=tk.BOTH, expand=True)
-        tk.Label(
-            frame,
-            text="建立你的 Minecraft 伺服器",
-            font=("Segoe UI", 17, "bold"),
-            fg=COLORS["text_primary"],
-            bg=COLORS["bg_dark"],
-        ).pack(anchor="w")
-        tk.Label(
-            frame,
-            text="完成以下步驟後即可開始與朋友遊玩",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_dark"],
-        ).pack(anchor="w", pady=(4, 20))
-        for index, text in enumerate(
-            (
-                "選擇伺服器核心與 Minecraft 版本",
-                "準備相容的 Java 環境",
-                "下載核心並設定 EULA",
-                "啟動伺服器或建立第一份備份",
-            ),
-            1,
-        ):
-            tk.Label(
-                frame,
-                text=f"{index}   {text}",
-                font=("Segoe UI", 10),
-                fg=COLORS["text_secondary"],
-                bg=COLORS["bg_dark"],
-            ).pack(anchor="w", pady=6)
-        start_btn = tk.Button(
-            frame,
-            text="開始下載與安裝",
-            font=("Segoe UI", 10, "bold"),
-            fg="#ffffff",
-            bg=COLORS["accent"],
-            activebackground=COLORS["accent_hover"],
-            activeforeground="#ffffff",
-            bd=0,
-            padx=16,
-            pady=10,
-            cursor="hand2",
-            command=lambda: (self.destroy(), start_callback()),
-        )
-        start_btn.pack(side="bottom", fill=tk.X, pady=(20, 0))
