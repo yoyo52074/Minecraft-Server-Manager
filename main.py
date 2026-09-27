@@ -31,7 +31,8 @@ class ApplicationController:
         self.core_metadata = CoreMetadata(self.server_directory)
         self.diagnostics = ServerDiagnostics(self.server_directory)
         self.root.core_combo.bind("<<ComboboxSelected>>", self.on_core_selected)
-        self.root.settings_button.config(command=self.open_settings_window)
+        self.root.advanced_settings_button.config(command=self.open_advanced_settings)
+        self.root.save_settings_button.config(command=self.save_inline_settings)
         self.root.start_button.config(command=self.start_server)
         self.root.stop_button.config(command=self.stop_server)
         self.root.change_dir_button.config(command=self.change_server_directory)
@@ -425,10 +426,11 @@ class ApplicationController:
             self.update_server_info()
             self.root.start_button.config(state="normal")
             if properties_exist:
-                self.root.settings_button.config(state="normal")
+                self._load_settings_page()
         elif core_selected:
             self.root.start_button.config(state="normal")
-            self.root.settings_button.config(state="disabled")
+            self.root.advanced_settings_button.config(state="disabled")
+            self.root.save_settings_button.config(state="disabled")
             self.set_status("尚未安裝 — 點擊啟動將自動下載安裝")
             self.root.status_detail_label.config(
                 text="點擊「啟動伺服器」將自動下載核心並啟動"
@@ -436,7 +438,8 @@ class ApplicationController:
             self.update_server_info()
         else:
             self.root.start_button.config(state="disabled")
-            self.root.settings_button.config(state="disabled")
+            self.root.advanced_settings_button.config(state="disabled")
+            self.root.save_settings_button.config(state="disabled")
             self.set_status("請選擇核心與版本")
             self.root.status_detail_label.config(
                 text="請在上方選擇伺服器核心與 Minecraft 版本"
@@ -460,7 +463,19 @@ class ApplicationController:
         except OSError:
             return False
 
-    def open_settings_window(self):
+    def _load_settings_page(self):
+        """Load and display settings on the settings page."""
+        properties = self.server_manager.get_server_properties()
+        self.root.populate_settings_page(properties)
+        self.root.advanced_settings_button.config(
+            state="normal" if properties else "disabled"
+        )
+        self.root.save_settings_button.config(
+            state="normal" if properties else "disabled"
+        )
+
+    def open_advanced_settings(self):
+        """Open the advanced settings window with all properties."""
         properties = self.server_manager.get_server_properties()
         if not properties:
             messagebox.showinfo(
@@ -468,13 +483,28 @@ class ApplicationController:
                 "找不到 server.properties 檔案。\n請先成功啟動一次伺服器以自動生成。",
             )
             return
-        ServerSettingsWindow(self.root, properties, self.save_settings)
+        ServerSettingsWindow(self.root, properties, self._on_advanced_settings_save)
 
-    def save_settings(self, new_properties):
+    def _on_advanced_settings_save(self, new_properties):
+        """Handle save from advanced settings window."""
         try:
             self.server_manager.save_server_properties(new_properties)
-            self.log("伺服器設定已儲存！", "success")
-            messagebox.showinfo("成功", "伺服器設定已儲存！")
+            self.log("進階設定已儲存！", "success")
+            messagebox.showinfo("成功", "設定已儲存！")
+            self._load_settings_page()
+        except Exception as e:
+            messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
+
+    def save_inline_settings(self):
+        """Save settings from the inline settings page."""
+        try:
+            current_properties = self.server_manager.get_server_properties()
+            inline_values = self.root.get_settings_values()
+            # Merge inline values with existing properties
+            current_properties.update(inline_values)
+            self.server_manager.save_server_properties(current_properties)
+            self.log("設定已儲存！", "success")
+            messagebox.showinfo("成功", "設定已儲存！")
         except Exception as e:
             messagebox.showerror("錯誤", f"儲存設定失敗: {e}")
 
@@ -610,7 +640,7 @@ class ApplicationController:
         self.set_status("伺服器運行中！")
         self.root.status_detail_label.config(text="伺服器正在運行，可以加入遊戲了")
         self.update_uptime()
-        self.root.settings_button.config(state="normal")
+        self._load_settings_page()
         self.root.command_input.config(state="normal")
         self.root.send_command_button.config(state="normal")
 

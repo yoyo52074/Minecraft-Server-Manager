@@ -486,19 +486,169 @@ class MainAppWindow(ttk.Window):
     def _build_settings_page(self):
         page = self._new_page("settings")
         self._page_header(
-            page, "伺服器設定", "編輯 server.properties；伺服器首次啟動後可用"
+            page, "伺服器設定", "常用設定直接修改，進階選項請點擊下方按鈕"
         )
-        self.settings_button = self._create_button(
-            page, "⚙ 開啟設定編輯器", COLORS["accent"], state="disabled"
-        )
-        self.settings_button.grid(row=1, column=0, sticky="w")
-        tk.Label(
-            page,
-            text="設定視窗內提供搜尋功能，可快速找到 MOTD、模式、連接埠與白名單等項目。",
-            font=("Segoe UI", 10),
+
+        # Container for settings (will be populated dynamically)
+        self.settings_container = tk.Frame(page, bg=COLORS["bg_dark"])
+        self.settings_container.grid(row=1, column=0, sticky="nsew", pady=(0, 14))
+        self.settings_container.columnconfigure(0, weight=1)
+        self.settings_container.columnconfigure(1, weight=1)
+
+        # Message when no settings available
+        self.no_settings_label = tk.Label(
+            self.settings_container,
+            text="尚未找到 server.properties\n請先啟動一次伺服器以生成設定檔",
+            font=("Segoe UI", 11),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
-        ).grid(row=2, column=0, sticky="w", pady=(14, 0))
+            justify=tk.CENTER,
+        )
+        self.no_settings_label.grid(row=0, column=0, columnspan=2, pady=40)
+
+        # Bottom buttons
+        button_frame = tk.Frame(page, bg=COLORS["bg_dark"])
+        button_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        button_frame.columnconfigure(0, weight=1)
+
+        self.advanced_settings_button = self._create_button(
+            button_frame, "⚙ 詳細設定", COLORS["bg_hover"], state="disabled"
+        )
+        self.advanced_settings_button.configure(fg=COLORS["text_primary"])
+        self.advanced_settings_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        self.save_settings_button = self._create_button(
+            button_frame, "💾 儲存設定", COLORS["accent"], state="disabled"
+        )
+        self.save_settings_button.grid(row=0, column=1, sticky="e")
+
+    def populate_settings_page(self, properties):
+        """Populate the settings page with common settings."""
+        # Clear existing widgets
+        for widget in self.settings_container.winfo_children():
+            widget.destroy()
+
+        if not properties:
+            self.no_settings_label.grid(row=0, column=0, columnspan=2, pady=40)
+            self.advanced_settings_button.config(state="disabled")
+            self.save_settings_button.config(state="disabled")
+            return
+
+        self.no_settings_label.grid_remove()
+        self.advanced_settings_button.config(state="normal")
+        self.save_settings_button.config(state="normal")
+
+        # Common settings to show inline
+        common_settings = [
+            ("motd", "伺服器名稱 (MOTD)", "entry"),
+            (
+                "gamemode",
+                "遊戲模式",
+                "combobox",
+                ["survival", "creative", "adventure", "spectator"],
+            ),
+            ("difficulty", "難度", "combobox", ["peaceful", "easy", "normal", "hard"]),
+            ("max-players", "最大玩家數", "entry"),
+            ("server-port", "連接埠", "entry"),
+            ("online-mode", "正版驗證", "boolean"),
+            ("pvp", "玩家對戰 (PVP)", "boolean"),
+            ("white-list", "白名單", "boolean"),
+            ("view-distance", "視距", "entry"),
+            ("hardcore", "極限模式", "boolean"),
+        ]
+
+        # Settings widgets storage
+        self.settings_widgets = {}
+
+        # Create two columns
+        row = 0
+        col = 0
+        for setting in common_settings:
+            key = setting[0]
+            label_text = setting[1]
+            widget_type = setting[2]
+
+            if key not in properties:
+                continue
+
+            # Create card for this setting
+            card_frame = tk.Frame(
+                self.settings_container,
+                bg=COLORS["bg_card"],
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["border"],
+            )
+            card_frame.grid(
+                row=row,
+                column=col,
+                sticky="ew",
+                padx=(0 if col == 0 else 7, 0 if col == 1 else 7),
+                pady=5,
+            )
+            card_frame.columnconfigure(1, weight=1)
+
+            # Label
+            tk.Label(
+                card_frame,
+                text=label_text,
+                font=("Segoe UI", 10),
+                fg=COLORS["text_secondary"],
+                bg=COLORS["bg_card"],
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=10)
+
+            # Widget
+            value = properties.get(key, "")
+            if widget_type == "entry":
+                widget = tk.Entry(
+                    card_frame,
+                    font=("Segoe UI", 10),
+                    bg=COLORS["bg_dark"],
+                    fg=COLORS["text_primary"],
+                    insertbackground=COLORS["text_primary"],
+                    bd=1,
+                    relief=tk.SOLID,
+                    highlightthickness=1,
+                    highlightbackground=COLORS["border"],
+                    highlightcolor=COLORS["accent"],
+                )
+                widget.insert(0, value)
+                widget.grid(row=0, column=1, sticky="ew", padx=12, pady=10, ipady=4)
+            elif widget_type == "combobox":
+                widget = ttk.Combobox(
+                    card_frame,
+                    values=setting[3],
+                    state="readonly",
+                    font=("Segoe UI", 10),
+                )
+                widget.set(value)
+                widget.grid(row=0, column=1, sticky="ew", padx=12, pady=10)
+            elif widget_type == "boolean":
+                widget = ttk.Combobox(
+                    card_frame,
+                    values=["true", "false"],
+                    state="readonly",
+                    font=("Segoe UI", 10),
+                )
+                widget.set(value)
+                widget.grid(row=0, column=1, sticky="ew", padx=12, pady=10)
+
+            self.settings_widgets[key] = widget
+
+            # Move to next position
+            if col == 0:
+                col = 1
+            else:
+                col = 0
+                row += 1
+
+        # Configure column weights
+        self.settings_container.columnconfigure(0, weight=1)
+        self.settings_container.columnconfigure(1, weight=1)
+
+    def get_settings_values(self):
+        """Get current values from settings widgets."""
+        return {key: widget.get() for key, widget in self.settings_widgets.items()}
 
 
 class ServerSettingsWindow(ttk.Toplevel):
