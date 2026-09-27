@@ -27,7 +27,7 @@ COLORS = {
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器管理器 v2.2 - Produced by yoyo")
+        self.title("Minecraft 伺服器管理器 v2.4.2 - Produced by yoyo")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self._pages = {}
@@ -561,6 +561,7 @@ class MainAppWindow(ttk.Window):
             ("pvp", "玩家對戰 (PVP)", "boolean"),
             ("white-list", "白名單", "boolean"),
             ("view-distance", "視距", "entry"),
+            ("simulation-distance", "模擬距離", "entry"),
             ("hardcore", "極限模式", "boolean"),
         ]
 
@@ -733,6 +734,7 @@ class ServerSettingsWindow(ttk.Toplevel):
             "server-port": ("連接埠 (server-port)", "entry"),
             "level-seed": ("地圖種子碼 (level-seed)", "entry"),
             "view-distance": ("視距 (view-distance)", "entry"),
+            "simulation-distance": ("模擬距離 (simulation-distance)", "entry"),
             "server-ip": ("伺服器 IP (server-ip)", "entry"),
             "white-list": ("白名單 (white-list)", "boolean"),
             "hardcore": ("極限模式 (hardcore)", "boolean"),
@@ -889,7 +891,7 @@ class AboutWindow(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text="版本：v2.2",
+            text="版本：v2.4.2",
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
