@@ -171,6 +171,9 @@ class MainAppWindow(ttk.Window):
                 button.configure(fg=COLORS["accent"], bg=COLORS["bg_hover"])
             else:
                 button.configure(fg=COLORS["text_secondary"], bg=COLORS["bg_card"])
+        # Trigger page-specific callbacks
+        if name == "settings" and hasattr(self, "_on_settings_page_shown"):
+            self._on_settings_page_shown()
 
     def _page_header(self, page, title, subtitle):
         header = tk.Frame(page, bg=COLORS["bg_dark"])
@@ -495,6 +498,9 @@ class MainAppWindow(ttk.Window):
         self.settings_container.columnconfigure(0, weight=1)
         self.settings_container.columnconfigure(1, weight=1)
 
+        # Track settings widgets
+        self.settings_widgets = {}
+
         # Message when no settings available
         self.no_settings_label = tk.Label(
             self.settings_container,
@@ -524,9 +530,10 @@ class MainAppWindow(ttk.Window):
 
     def populate_settings_page(self, properties):
         """Populate the settings page with common settings."""
-        # Clear existing widgets
-        for widget in self.settings_container.winfo_children():
-            widget.destroy()
+        # Clear only settings widgets (not the no_settings_label)
+        for widget in self.settings_widgets.values():
+            widget.master.destroy()
+        self.settings_widgets.clear()
 
         if not properties:
             self.no_settings_label.grid(row=0, column=0, columnspan=2, pady=40)

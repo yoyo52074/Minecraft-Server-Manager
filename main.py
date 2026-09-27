@@ -157,6 +157,7 @@ class ApplicationController:
         self.log("管理器啟動...", "info")
         self.root.path_label.config(text=self.server_directory)
         self.root.status_detail_label.config(text="正在初始化...")
+        self.root._on_settings_page_shown = self._load_settings_page
         self.detect_available_java()
         self.populate_core_selector()
         self.check_existing_server()
