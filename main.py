@@ -43,6 +43,8 @@ class ApplicationController:
         self.root.backup_button.config(command=self.create_backup)
         self.root.restore_button.config(command=self.restore_backup)
         self._auto_start_after_download = False
+        self._core_download_in_progress = False
+        self._java_download_in_progress = False
         self.java_executable_path = "java"
         self.embedded_java_path = os.path.join(
             self.app_directory, "jdk-17", "bin", "java.exe"
@@ -304,6 +306,8 @@ class ApplicationController:
 
     def _download_core(self, auto_start_after=False):
         """Download the selected core. If auto_start_after is True, start server when done."""
+        if self._core_download_in_progress or self._java_download_in_progress:
+            return
         core = self.root.core_combo.get()
         version = self.root.version_combo.get()
         if not core or not version or "載入中" in version:
@@ -330,6 +334,7 @@ class ApplicationController:
             self.log("將在新核心下載成功後清理舊版本核心。", "warn")
 
         self.set_status(f"準備下載 {core} {version}...")
+        self._core_download_in_progress = True
         self.root.start_button.config(state="disabled")
         self.start_indeterminate_progress()
 
@@ -366,6 +371,7 @@ class ApplicationController:
                 else:
                     messagebox.showerror("下載失敗", message)
                     self.root.start_button.config(state="normal")
+                self._core_download_in_progress = False
 
             self.root.after(0, _update_ui)
 
@@ -529,6 +535,8 @@ class ApplicationController:
         self._actually_start_server()
 
     def _actually_start_server(self):
+        if self._core_download_in_progress or self._java_download_in_progress:
+            return
         jar_files = self.get_server_jars()
         if not jar_files:
             messagebox.showerror("錯誤", "找不到伺服器核心 .jar 檔案。")
@@ -760,12 +768,22 @@ class ApplicationController:
         return 17
 
     def download_java(self, java_major=17, start_after=False):
+        """Download Java once at a time, then optionally retry the pending start."""
+        if self._java_download_in_progress:
+            self.log("Java 正在下載中，請等待目前的下載完成。", "warn")
+            return
+
+        self._java_download_in_progress = True
+        self.root.start_button.config(state="disabled")
+
         def _worker():
+            zip_path = os.path.join(
+                self.app_directory, f"jdk-{java_major}-portable.zip"
+            )
+            partial_zip_path = f"{zip_path}.part"
+            download_succeeded = False
             try:
                 java_url = f"https://api.adoptium.net/v3/binary/latest/{java_major}/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk"
-                zip_path = os.path.join(
-                    self.app_directory, f"jdk-{java_major}-portable.zip"
-                )
 
                 self.root.after(0, lambda: self.start_indeterminate_progress())
                 self.root.after(0, self.log, f"正在下載 Java {java_major}...", "info")
@@ -778,9 +796,11 @@ class ApplicationController:
                 ) as r:
                     r.raise_for_status()
                     total_size = int(r.headers.get("content-length", 0))
-                    with open(zip_path, "wb") as f:
+                    with open(partial_zip_path, "wb") as f:
                         bytes_downloaded = 0
                         for chunk in r.iter_content(chunk_size=8192):
+                            if not chunk:
+                                continue
                             f.write(chunk)
                             bytes_downloaded += len(chunk)
                             if total_size > 0:
@@ -789,6 +809,7 @@ class ApplicationController:
                                     self.update_progress,
                                     (bytes_downloaded / total_size) * 100,
                                 )
+                os.replace(partial_zip_path, zip_path)
 
                 self.root.after(0, self.log, "Java 下載完成...", "success")
                 self.root.after(0, lambda: self.set_status("正在解壓縮 Java..."))
@@ -814,22 +835,39 @@ class ApplicationController:
                 )
                 self.embedded_java_path = self.java_executable_path
                 self.java_major_version = java_major
+                download_succeeded = True
                 self.root.after(
                     0,
                     self.root.java_info_label.config,
                     {"text": f"Java：{java_major}\n狀態：已準備"},
                 )
-                if start_after:
-                    self.root.after(0, self.start_server)
             except Exception as e:
+                if os.path.exists(partial_zip_path):
+                    try:
+                        os.remove(partial_zip_path)
+                    except OSError:
+                        pass
                 self.root.after(0, self.log, f"下載 Java 失敗: {e}", "error")
                 self.root.after(
                     0, lambda: messagebox.showerror("錯誤", f"下載 Java 失敗: {e}")
                 )
             finally:
-                self.root.after(0, lambda: self.stop_and_reset_progress(0))
+                self.root.after(
+                    0,
+                    self._finish_java_download,
+                    download_succeeded and start_after,
+                )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_java_download(self, start_after=False):
+        """Restore the UI after a Java download has finished or failed."""
+        self._java_download_in_progress = False
+        self.stop_and_reset_progress(0)
+        if start_after:
+            self.root.after(0, self.start_server)
+        elif not (self.server_process and self.server_process.poll() is None):
+            self.root.start_button.config(state="normal")
 
 
 if __name__ == "__main__":
