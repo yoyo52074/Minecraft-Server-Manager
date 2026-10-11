@@ -16,7 +16,7 @@ from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
-from .operations import JavaManager, MonitorService, PlayerManager, Scheduler
+from .operations import MonitorService, PlayerManager, Scheduler
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -40,7 +40,6 @@ def create_app(controller, database_path):
     app.state.profiles = profiles
     app.state.multi = multi
     app.state.files = files
-    app.state.java = JavaManager()
     app.state.players = PlayerManager(multi, db)
     app.state.backup_jobs = BackupJobManager(db)
     app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]), app.state.players)
@@ -356,16 +355,6 @@ def create_app(controller, database_path):
                    "snapshot": Path(snapshot).name}
         db.audit(user["user_id"], "update_settings", json.dumps(changes, ensure_ascii=False), server_id=profile_id)
         return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
-
-    @app.get("/java", response_class=HTMLResponse)
-    def java_page(request: Request):
-        user = require_user(request, {"admin"})
-        return render(request, "java.html", java_versions=app.state.java.list(), csrf=user["csrf_token"])
-
-    @app.get("/api/java")
-    def java_scan(request: Request):
-        require_user(request, {"admin"})
-        return {"java": app.state.java.list()}
 
     @app.get("/server/{profile_id}/players", response_class=HTMLResponse)
     def players_page(profile_id: int, request: Request):

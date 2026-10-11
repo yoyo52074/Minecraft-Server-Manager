@@ -72,6 +72,16 @@ class MaintenanceApiTests(unittest.TestCase):
                 self.assertIn("MSPT", response.text)
                 self.assertIn("Java Heap", response.text)
 
+    def test_server_shortcuts_are_in_header_and_java_scanner_is_removed(self):
+        response=self.client.get(f"/server/{self.profile_id}")
+        self.assertEqual(response.status_code,200,response.text[:500])
+        header=response.text.split("</nav>",1)[0]
+        for path in (f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/settings"):
+            self.assertIn(f'href="{path}"',header)
+        self.assertNotIn("Java 管理",response.text)
+        self.assertEqual(self.client.get("/java").status_code,404)
+        self.assertEqual(self.client.get("/api/java").status_code,404)
+
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
         retention = self.client.put(f"/api/servers/{self.profile_id}/backups/retention", headers=headers, json={"retain_count": 2, "max_age_days": 30})

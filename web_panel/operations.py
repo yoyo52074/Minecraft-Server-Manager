@@ -13,30 +13,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-class JavaManager:
-    def scan(self):
-        candidates=[];seen=set()
-        for raw in [os.environ.get('JAVA_HOME','')]+os.environ.get('PATH','').split(os.pathsep):
-            p=Path(raw)
-            if p.name.lower()=='bin':p=p.parent
-            exe=p/'bin'/'java.exe' if os.name=='nt' else p/'bin'/'java'
-            if exe.exists():candidates.append(exe)
-        for base in [Path('C:/Program Files/Java'),Path('C:/Program Files/Eclipse Adoptium'),Path('C:/Program Files/Microsoft')]:
-            if base.exists():candidates.extend(base.glob('**/bin/java.exe'))
-        records=[]
-        for exe in candidates:
-            key=str(exe.resolve())
-            if key in seen:continue
-            seen.add(key);version='未知';ok=False
-            try:
-                result=subprocess.run([str(exe),'-version'],capture_output=True,text=True,timeout=5);text=(result.stderr or '')+'\n'+(result.stdout or '')
-                match=re.search(r'version "([^"]+)',text);version=match.group(1) if match else '未知';ok=result.returncode==0
-            except (OSError,subprocess.SubprocessError):pass
-            records.append({'path':key,'version':version,'available':ok})
-        return records
-    def list(self):return self.scan()
-
-
 class PlayerManager:
     def __init__(self,multi,db=None):self.multi=multi;self.db=db;self.last_snapshot_reliable={}
     def _profile_directory(self,profile_id):
@@ -312,7 +288,7 @@ class MonitorService:
         result=dict(cached)
         if jcmd:
             try:
-                output=subprocess.run([jcmd,str(proc.pid),'GC.heap_info'],capture_output=True,text=True,timeout=4).stdout
+                output=subprocess.run([jcmd,str(proc.pid),'GC.heap_info'],capture_output=True,text=True,timeout=4,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0).stdout
                 match=re.search(r'(?:total\s+([0-9]+)K,\s*used\s+([0-9]+)K|used\s+([0-9]+)K.*?committed\s+([0-9]+)K)',output,re.I|re.S)
                 if match:
                     if match.group(1):total,used=float(match.group(1)),float(match.group(2))
@@ -325,7 +301,7 @@ class MonitorService:
         jstat=next((str(path) for path in jstat_candidates if path.is_file()),None)
         if jstat:
             try:
-                output=subprocess.run([jstat,'-gc',str(proc.pid)],capture_output=True,text=True,timeout=4).stdout.splitlines()
+                output=subprocess.run([jstat,'-gc',str(proc.pid)],capture_output=True,text=True,timeout=4,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0).stdout.splitlines()
                 if len(output)>1:
                     headers=output[0].split();values=output[-1].split();data=dict(zip(headers,values))
                     gc_count=sum(float(data.get(key,0)) for key in ('YGC','FGC','CGC'));gc_time=sum(float(data.get(key,0)) for key in ('YGCT','FGCT','CGCT'))*1000
