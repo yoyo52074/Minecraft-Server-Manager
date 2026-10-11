@@ -26,8 +26,9 @@
     <h2>Java 與啟動</h2>
     <div class="grid">
       <div>
-        <label>Java 路徑</label><input name="java_path" value="{{ profile.java_path }}">
-        <small class="muted">Minecraft 26.1 及更新版本需要 Java 25 或以上，請指向符合版本的 Java 執行檔。</small>
+        <label>Java 路徑</label><input name="java_path" value="{{ profile.java_path }}" placeholder="例如：C:\Program Files\Java\jdk-25\bin\java.exe">
+        <small class="muted">依目前 Minecraft 版本尋找合適的 Java；若電腦上沒有符合需求的版本，系統會自動下載、驗證並安裝 Temurin Java。</small>
+        {% if can_edit_java %}<div class="java-actions"><button id="java-auto-button" type="button" class="secondary" onclick="autoConfigureJava()">尋找並自動套用 Java</button></div><p id="java-auto-status" class="muted" role="status" aria-live="polite"></p>{% endif %}
         <label>最小記憶體 MB</label><input name="min_memory" type="number" min="256" value="{{ profile.min_memory }}">
       </div>
       <div>
@@ -58,11 +59,16 @@
   <section class="card"><h2>變更 Minecraft 版本</h2><p class="muted">你沒有「修改啟動參數」權限，無法變更伺服器核心版本。</p></section>
   {% endif %}
 </main>
-<style>.core-update-card{margin-top:16px}.core-update-status{margin-top:12px;overflow-wrap:anywhere}.core-update-status progress{display:block;width:100%;height:18px;margin-top:8px}</style>
+<style>.core-update-card{margin-top:16px}.core-update-status{margin-top:12px;overflow-wrap:anywhere}.core-update-status progress{display:block;width:100%;height:18px;margin-top:8px}.java-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}#java-auto-status{margin:8px 0;overflow-wrap:anywhere}</style>
 <script>
 const id={{ profile.id }},csrf={{ csrf|tojson }};
 const form=document.getElementById('settings-form');
 form.onsubmit=async e=>{e.preventDefault();const properties={};for(const line of document.getElementById('advanced').value.split('\n')){const index=line.indexOf('=');if(index>0)properties[line.slice(0,index).trim()]=line.slice(index+1).trim()}for(const name of ['motd','gamemode','difficulty','max-players','server-port','online-mode','pvp','white-list']){const el=form.elements[name];if(el)properties[name]=el.value}const payload={properties,profile:{java_path:form.elements.java_path.value,min_memory:Number(form.elements.min_memory.value),max_memory:Number(form.elements.max_memory.value),launcher:form.elements.launcher.value}};const r=await fetch('/api/servers/'+id+'/settings',{method:'PUT',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify(payload)});const d=await r.json();document.getElementById('result').textContent=r.ok?'設定已儲存，必要時請重啟伺服器':(d.detail||'儲存失敗');if(r.ok){const advanced=Object.entries(d.properties||properties).map(([k,v])=>k+'='+v).join('\n');document.getElementById('advanced').value=advanced}};
+{% if can_edit_java %}
+const javaStatus=document.getElementById('java-auto-status'),javaButton=document.getElementById('java-auto-button');
+async function pollJavaJob(jobId){try{const r=await fetch('/api/servers/'+id+'/java/auto/'+jobId,{cache:'no-store'}),d=await r.json();if(!r.ok){javaStatus.textContent=d.detail||'無法讀取 Java 設定進度';javaButton.disabled=false;return}const job=d.job;javaStatus.textContent=job.message||job.error||'正在處理…';if(job.status==='completed'){form.elements.java_path.value=job.java_path;javaStatus.textContent=job.message+'；路徑已自動套用並儲存。';javaButton.disabled=false}else if(job.status==='failed'){javaStatus.textContent=(job.error||job.message)+' 可手動輸入 java.exe 路徑後再按「儲存設定」。';javaButton.disabled=false}else setTimeout(()=>pollJavaJob(jobId),1000)}catch(e){javaStatus.textContent='連線中斷；重新載入頁面後可再次搜尋。';javaButton.disabled=false}}
+async function autoConfigureJava(){javaButton.disabled=true;javaStatus.textContent='正在搜尋電腦上已安裝的 Java…';try{const r=await fetch('/api/servers/'+id+'/java/auto',{method:'POST',headers:{'x-csrf-token':csrf}}),d=await r.json();if(!r.ok){javaStatus.textContent=d.detail||'無法啟動 Java 搜尋';javaButton.disabled=false;return}javaStatus.textContent='搜尋版本需求 Java '+d.required_version+'+；若找不到會自動下載安裝。';pollJavaJob(d.job_id)}catch(e){javaStatus.textContent='無法連線至伺服器';javaButton.disabled=false}}
+{% endif %}
 {% if can_edit_core %}
 const updateStatus=document.getElementById('core-update-status');
 function showCoreJob(job){if(!job)return;const labels={queued:'排隊中',running:'進行中',completed:'已完成',failed:'失敗'};updateStatus.textContent=(labels[job.status]||job.status)+'｜'+(job.message||job.error||'');if(job.error)updateStatus.textContent+=' '+job.error;if(job.status==='running'&&job.stage==='download'){const progress=document.createElement('progress');progress.max=100;progress.value=job.progress||0;updateStatus.appendChild(progress);const percent=document.createElement('span');percent.textContent=(job.progress||0)+'%';updateStatus.appendChild(percent)}if(job.status==='completed'){document.getElementById('update-core-button').disabled=false;const key='mcm-core-update-reloaded-'+job.id;if(!sessionStorage.getItem(key)){sessionStorage.setItem(key,'1');setTimeout(()=>location.reload(),1800)}}else if(job.status==='failed'){document.getElementById('update-core-button').disabled=false}}

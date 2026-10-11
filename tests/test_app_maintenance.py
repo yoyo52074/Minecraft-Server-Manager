@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from web_panel.app import create_app
+from web_panel.java_runtime import JavaRuntimeJobs
 
 
 class FakeBridge:
@@ -112,10 +113,62 @@ class MaintenanceApiTests(unittest.TestCase):
     def test_settings_page_has_real_core_version_update_controls(self):
         response=self.client.get(f"/server/{self.profile_id}/settings")
         self.assertEqual(response.status_code,200,response.text[:500])
+        self.assertIn("尋找並自動套用 Java",response.text)
+        self.assertIn("自動下載、驗證並安裝 Temurin Java",response.text)
         self.assertIn("變更 Minecraft 版本",response.text)
         self.assertIn("/core-update",response.text)
         self.assertIn("目標 Minecraft 版本",response.text)
         self.assertIn("backups/cores",response.text)
+
+    def test_java_auto_search_applies_matching_runtime_and_logs_it(self):
+        self.app.state.profiles.update(self.profile_id,{"minecraft_version":"26.2"})
+        with patch.object(JavaRuntimeJobs,"discover",return_value=[{"path":r"C:\Java\jdk-25\bin\java.exe","version":25}]):
+            response=self.client.post(f"/api/servers/{self.profile_id}/java/auto",headers={"x-csrf-token":self.csrf})
+            self.assertEqual(response.status_code,200,response.text)
+            for _ in range(100):
+                job=self.client.get(f"/api/servers/{self.profile_id}/java/auto/{response.json()['job_id']}").json()["job"]
+                if job["status"] in {"completed","failed"}:break
+                time.sleep(.01)
+        self.assertEqual(job["status"],"completed",job)
+        self.assertEqual(job["required_version"],25)
+        self.assertEqual(self.app.state.profiles.get(self.profile_id)["java_path"],r"C:\Java\jdk-25\bin\java.exe")
+        self.assertTrue(any(row["action"]=="auto_configure_java" for row in self.app.state.db.server_audit_logs(self.profile_id,20)))
+
+    def test_java_auto_search_downloads_when_no_compatible_runtime_is_found(self):
+        self.app.state.profiles.update(self.profile_id,{"minecraft_version":"26.2"})
+        expected=r"C:\Users\Test\AppData\Roaming\MinecraftServerManager\runtimes\jdk-25\bin\java.exe"
+        with patch.object(JavaRuntimeJobs,"discover",return_value=[]), patch.object(JavaRuntimeJobs,"_download_and_install",return_value=expected), patch.object(JavaRuntimeJobs,"_version",return_value=25):
+            response=self.client.post(f"/api/servers/{self.profile_id}/java/auto",headers={"x-csrf-token":self.csrf})
+            self.assertEqual(response.status_code,200,response.text)
+            for _ in range(100):
+                job=self.client.get(f"/api/servers/{self.profile_id}/java/auto/{response.json()['job_id']}").json()["job"]
+                if job["status"] in {"completed","failed"}:break
+                time.sleep(.01)
+        self.assertEqual(job["status"],"completed",job)
+        self.assertEqual(job["java_path"],expected)
+        self.assertEqual(self.app.state.profiles.get(self.profile_id)["java_path"],expected)
+
+    def test_start_failure_auto_searches_java_and_retries_start(self):
+        self.app.state.profiles.update(self.profile_id,{"minecraft_version":"26.2"})
+        java_path=r"C:\Java\jdk-25\bin\java.exe"
+        with patch.object(self.app.state.multi,"start",return_value=(False,"Minecraft 26.2 需要 Java 25 或更新版本。目前找到的 Java 版本不足：Java 21。")), patch.object(JavaRuntimeJobs,"discover",return_value=[{"path":java_path,"version":25}]), patch.object(self.app.state.java_runtime,"start_server",return_value=(True,"已送出啟動要求")) as retry_start:
+            response=self.client.post(f"/api/servers/{self.profile_id}/start",headers={"x-csrf-token":self.csrf})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertIn("java_setup_job_id",response.json())
+            for _ in range(100):
+                job=self.client.get(f"/api/servers/{self.profile_id}/java/auto/{response.json()['java_setup_job_id']}").json()["job"]
+                if job["status"] in {"completed","failed"}:break
+                time.sleep(.01)
+        self.assertEqual(job["status"],"completed",job)
+        self.assertTrue(job["start_after"])
+        self.assertTrue(job["start_result"]["ok"])
+        retry_start.assert_called_once_with(self.profile_id)
+        self.assertEqual(self.app.state.profiles.get(self.profile_id)["java_path"],java_path)
+
+    def test_java_auto_search_requires_csrf(self):
+        self.client.cookies.delete("mcm_csrf")
+        response=self.client.post(f"/api/servers/{self.profile_id}/java/auto")
+        self.assertEqual(response.status_code,403)
 
     def test_core_update_api_rejects_unsupported_core_and_running_server(self):
         url=f"/api/servers/{self.profile_id}/core-update"
@@ -141,7 +194,7 @@ class MaintenanceApiTests(unittest.TestCase):
         directory=Path(self.temp.name)/"minecraft-26-1"
         profile=self.app.state.profiles.create("Minecraft 26.1",directory,"Paper",minecraft_version="26.1",java_path="java")
         (directory/"server.jar").write_bytes(b"placeholder")
-        with patch("web_panel.multi_server.CoreAdapter.java_major_version",return_value=21), patch("web_panel.multi_server.subprocess.Popen") as popen:
+        with patch("web_panel.multi_server.CoreAdapter.java_major_version",return_value=21), patch("web_panel.multi_server.subprocess.Popen") as popen, patch.object(JavaRuntimeJobs,"discover",return_value=[]):
             response=self.client.post(f"/api/servers/{profile['id']}/start",headers={"x-csrf-token":self.csrf})
         self.assertEqual(response.status_code,200)
         self.assertFalse(response.json()["ok"])

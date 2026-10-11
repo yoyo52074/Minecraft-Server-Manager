@@ -2,6 +2,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,6 +19,8 @@ from .core_update import CoreUpdateJobs
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
+from .java_runtime import JavaRuntimeJobs
+from core_metadata import minimum_java_version
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -37,12 +40,14 @@ def create_app(controller, database_path):
     multi = MultiServerManager(profiles, controller.web_bridge)
     files = SafeFileService(profiles)
     core_updates = CoreUpdateJobs(profiles, multi)
+    java_runtime = JavaRuntimeJobs(profiles, db, Path(database_path).resolve().parent / "runtimes", start_server=multi.start)
     app.state.db = db
     app.state.bridge = controller.web_bridge
     app.state.profiles = profiles
     app.state.multi = multi
     app.state.files = files
     app.state.core_updates = core_updates
+    app.state.java_runtime = java_runtime
     app.state.players = PlayerManager(multi, db)
     app.state.backup_jobs = BackupJobManager(db)
     app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]), app.state.players)
@@ -99,7 +104,8 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "settings.view")
         profile = profiles.get(profile_id)
         can_edit_core = db.has_server_permission(user, profile_id, "settings.edit_startup")
-        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"], can_edit_core=can_edit_core)
+        can_edit_java = db.has_server_permission(user, profile_id, "settings.edit_java")
+        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"], can_edit_core=can_edit_core, can_edit_java=can_edit_java)
 
     @app.get("/server/{profile_id}/history", response_class=HTMLResponse)
     def server_history_page(profile_id: int, request: Request):
@@ -250,7 +256,7 @@ def create_app(controller, database_path):
             action = entry["action"]
             permission = ("players.view" if action.startswith("player_") else
                           "backups.view" if "backup" in action else
-                          "settings.view" if "settings" in action else
+                          "settings.view" if "settings" in action or action.startswith("auto_configure_java") else
                           "files.view" if action.startswith(("file_", "upload_file", "edit_file", "delete_file")) else
                           "console.view" if action.startswith("console_") else "server.view")
             if db.has_server_permission(user, profile_id, permission):
@@ -367,6 +373,26 @@ def create_app(controller, database_path):
                    "snapshot": Path(snapshot).name}
         db.audit(user["user_id"], "update_settings", json.dumps(changes, ensure_ascii=False), server_id=profile_id)
         return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
+
+    @app.post("/api/servers/{profile_id}/java/auto")
+    def auto_configure_java(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "settings.edit_java")
+        check_csrf(request, user)
+        profile = profiles.get(profile_id)
+        required = minimum_java_version(profile.get("minecraft_version"))
+        try:
+            job_id = java_runtime.start(profile_id, required, user["user_id"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job_id": job_id, "required_version": required}
+
+    @app.get("/api/servers/{profile_id}/java/auto/{job_id}")
+    def auto_configure_java_status(profile_id: int, job_id: str, request: Request):
+        require_server_permission(request, profile_id, "settings.view")
+        job = java_runtime.get(job_id, profile_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="找不到 Java 設定工作")
+        return {"job": job}
 
     @app.get("/api/servers/{profile_id}/core-update")
     def latest_core_update(profile_id: int, request: Request):
@@ -962,6 +988,15 @@ def create_app(controller, database_path):
         actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
         ok, message = actions[action](profile_id)
         db.audit(user["user_id"], f"server_{action}", str(profile_id), server_id=profile_id)
+        required_match = re.search(r"需要 Java (\d+)", message) if action == "start" and not ok else None
+        if required_match and db.has_server_permission(user, profile_id, "settings.edit_java"):
+            required = int(required_match.group(1))
+            try:
+                job_id = java_runtime.start(profile_id, required, user["user_id"], start_after=True)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"ok": False, "java_setup_job_id": job_id,
+                    "message": f"{message} 正在自動搜尋 Java {required}+；若找不到會自動下載，完成後重試啟動。"}
         return {"ok": ok, "message": message}
 
     @app.websocket("/ws/logs")
