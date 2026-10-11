@@ -190,7 +190,7 @@ class MultiServerManager:
         if self._is_legacy(profile):
             result = self.legacy_bridge.status()
             result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": "running" if result.get("running") else "stopped"})
-            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process)
+            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"])
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -212,6 +212,7 @@ class MultiServerManager:
     @staticmethod
     def _metrics(process, directory=None):
         disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0}
+        available = psutil is not None
         if psutil is not None:
             try:
                 usage = psutil.disk_usage(str(directory or Path.cwd()))
@@ -219,18 +220,26 @@ class MultiServerManager:
                 disk = {"disk_used_percent": round(usage.percent, 1), "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 2), "net_sent_mb": round(net.bytes_sent / 1024 / 1024, 1), "net_recv_mb": round(net.bytes_recv / 1024 / 1024, 1)}
             except (psutil.Error, OSError):
                 pass
+        else:
+            try:
+                usage = shutil.disk_usage(str(directory or Path.cwd()))
+                disk["disk_used_percent"] = round((usage.used / usage.total) * 100, 1)
+                disk["disk_free_gb"] = round(usage.free / 1024 / 1024 / 1024, 2)
+            except OSError:
+                pass
         if not process or process.poll() is not None or psutil is None:
-            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
+            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
         try:
             proc = psutil.Process(process.pid)
             return {
                 "cpu_percent": round(proc.cpu_percent(interval=None), 1),
                 "memory_mb": round(proc.memory_info().rss / 1024 / 1024, 1),
                 "memory_percent": round(proc.memory_percent(), 1),
+                "available": available,
                 **disk,
             }
         except (psutil.Error, OSError):
-            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
+            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
 
     def statuses(self):
         return [self.status(item["id"]) for item in self.store.list()]
