@@ -192,14 +192,15 @@ class MultiServerManager:
         if self._is_legacy(profile):
             result = self.legacy_bridge.status()
             phase = "running" if result.get("running") else self._phases.get(profile_id, "stopped")
+            timeout_phase = None
             if not result.get("running") and phase in {"starting", "stopping"}:
                 timeout = 30 if phase == "starting" else 15
                 if time.time() - self._phase_at.get(profile_id, 0) > timeout:
+                    timeout_phase = phase
                     phase = "error" if phase == "starting" else "stopped"
                     self._phases[profile_id] = phase
-            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase})
+            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase, "phase_timeout": timeout_phase})
             result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"])
-            self.db.record_metrics(profile_id, result["metrics"])
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -209,7 +210,6 @@ class MultiServerManager:
             if self._phases.get(profile_id) not in {"error", "stopped"}:
                 self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
         metrics = self._metrics(process, profile["directory"])
-        self.db.record_metrics(profile_id, metrics)
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],

@@ -47,6 +47,7 @@ class WebDatabase:
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    server_id INTEGER,
                     action TEXT NOT NULL,
                     detail TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
@@ -71,8 +72,33 @@ class WebDatabase:
                     net_sent_mb REAL NOT NULL,
                     net_recv_mb REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS alert_settings (
+                    server_id INTEGER PRIMARY KEY,
+                    cpu_percent REAL NOT NULL DEFAULT 90,
+                    memory_percent REAL NOT NULL DEFAULT 90,
+                    disk_used_percent REAL NOT NULL DEFAULT 90,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS alert_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    alert_key TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    resolved_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS backup_settings (
+                    server_id INTEGER PRIMARY KEY,
+                    retain_count INTEGER NOT NULL DEFAULT 10,
+                    max_age_days INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(audit_logs)")}
+            if "server_id" not in columns:
+                db.execute("ALTER TABLE audit_logs ADD COLUMN server_id INTEGER")
 
     @staticmethod
     def _now():
@@ -167,11 +193,11 @@ class WebDatabase:
         with self._connect() as db:
             db.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
-    def audit(self, user_id, action: str, detail: str = ""):
+    def audit(self, user_id, action: str, detail: str = "", server_id=None):
         with self._connect() as db:
             db.execute(
-                "INSERT INTO audit_logs(user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, action, detail[:1000], self._now()),
+                "INSERT INTO audit_logs(user_id, server_id, action, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, server_id, action, detail[:1000], self._now()),
             )
 
     def list_audit_logs(self, limit=100):
@@ -183,6 +209,92 @@ class WebDatabase:
                 ORDER BY a.id DESC LIMIT ?
                 """, (limit,)
             ).fetchall()]
+
+    def server_audit_logs(self, server_id, limit=100):
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT a.*, u.username FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id "
+                "WHERE a.server_id=? ORDER BY a.id DESC LIMIT ?", (server_id, limit)
+            ).fetchall()]
+
+    def schedule_runs(self, schedule_id=None, limit=100):
+        with self._connect() as db:
+            query = "SELECT r.*, s.server_id, s.name AS schedule_name, s.action FROM schedule_runs r LEFT JOIN schedules s ON s.id=r.schedule_id"
+            args = []
+            if schedule_id is not None:
+                query += " WHERE r.schedule_id=?"
+                args.append(schedule_id)
+            query += " ORDER BY r.id DESC LIMIT ?"
+            args.append(limit)
+            return [dict(row) for row in db.execute(query, args).fetchall()]
+
+    def alert_thresholds(self, server_id):
+        defaults = {"server_id": server_id, "cpu_percent": 90.0, "memory_percent": 90.0, "disk_used_percent": 90.0}
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM alert_settings WHERE server_id=?", (server_id,)).fetchone()
+        return dict(row) if row else defaults
+
+    def set_alert_thresholds(self, server_id, values):
+        keys = ("cpu_percent", "memory_percent", "disk_used_percent")
+        normalized = {key: float(values.get(key, self.alert_thresholds(server_id)[key])) for key in keys}
+        if any(value < 1 or value > 100 for value in normalized.values()):
+            raise ValueError("告警門檻必須介於 1 到 100")
+        with self._connect() as db:
+            db.execute("INSERT INTO alert_settings(server_id,cpu_percent,memory_percent,disk_used_percent,updated_at) VALUES(?,?,?,?,?) "
+                       "ON CONFLICT(server_id) DO UPDATE SET cpu_percent=excluded.cpu_percent,memory_percent=excluded.memory_percent,disk_used_percent=excluded.disk_used_percent,updated_at=excluded.updated_at",
+                       (server_id, normalized["cpu_percent"], normalized["memory_percent"], normalized["disk_used_percent"], self._now()))
+        return self.alert_thresholds(server_id)
+
+    def evaluate_metric_alerts(self, server_id, metrics):
+        thresholds = self.alert_thresholds(server_id)
+        checks = {
+            "cpu": ("CPU", float(metrics.get("cpu_percent", 0)), thresholds["cpu_percent"], "%"),
+            "memory": ("記憶體使用率", float(metrics.get("memory_percent", 0)), thresholds["memory_percent"], "%"),
+            "disk": ("磁碟使用率", float(metrics.get("disk_used_percent", 0)), thresholds["disk_used_percent"], "%"),
+        }
+        now = __import__("time").time()
+        with self._connect() as db:
+            for key, (label, value, threshold, unit) in checks.items():
+                active = value >= threshold
+                previous = db.execute("SELECT id FROM alert_events WHERE server_id=? AND alert_key=? AND active=1 ORDER BY id DESC LIMIT 1", (server_id, key)).fetchone()
+                if active and not previous:
+                    db.execute("INSERT INTO alert_events(server_id,alert_key,message,active,created_at) VALUES(?,?,?,?,?)", (server_id, key, f"{label}達到 {value:.1f}{unit}（門檻 {threshold:.1f}{unit}）", 1, now))
+                elif not active and previous:
+                    db.execute("UPDATE alert_events SET active=0,resolved_at=? WHERE id=?", (now, previous["id"]))
+
+    def evaluate_server_phase(self, server_id, phase, timeout_phase=None):
+        now = __import__("time").time()
+        with self._connect() as db:
+            if timeout_phase:
+                timeout = db.execute("SELECT id FROM alert_events WHERE server_id=? AND alert_key='server_timeout' AND active=1 ORDER BY id DESC LIMIT 1", (server_id,)).fetchone()
+                if not timeout:
+                    db.execute("INSERT INTO alert_events(server_id,alert_key,message,active,created_at) VALUES(?,?,?,?,?)", (server_id, "server_timeout", f"伺服器{('啟動' if timeout_phase == 'starting' else '停止')}逾時", 1, now))
+            previous = db.execute("SELECT id FROM alert_events WHERE server_id=? AND alert_key='server_state' AND active=1 ORDER BY id DESC LIMIT 1", (server_id,)).fetchone()
+            if phase == "error" and not previous:
+                db.execute("INSERT INTO alert_events(server_id,alert_key,message,active,created_at) VALUES(?,?,?,?,?)", (server_id, "server_state", "伺服器進入異常狀態，可能是啟動失敗、程序非預期結束或停止逾時", 1, now))
+            elif phase in {"running", "stopped"} and previous:
+                db.execute("UPDATE alert_events SET active=0,resolved_at=? WHERE id=?", (now, previous["id"]))
+            if phase in {"running", "stopped"} and not timeout_phase:
+                db.execute("UPDATE alert_events SET active=0,resolved_at=? WHERE server_id=? AND alert_key='server_timeout' AND active=1", (now, server_id))
+
+    def alert_events(self, server_id, limit=100):
+        with self._connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM alert_events WHERE server_id=? ORDER BY id DESC LIMIT ?", (server_id, limit)).fetchall()]
+
+    def backup_retention(self, server_id):
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM backup_settings WHERE server_id=?", (server_id,)).fetchone()
+        return dict(row) if row else {"server_id": server_id, "retain_count": 10, "max_age_days": 0}
+
+    def set_backup_retention(self, server_id, retain_count, max_age_days=0):
+        retain_count, max_age_days = int(retain_count), int(max_age_days)
+        if not 1 <= retain_count <= 1000 or not 0 <= max_age_days <= 36500:
+            raise ValueError("保留數量須介於 1 至 1000；保存天數須介於 0 至 36500")
+        with self._connect() as db:
+            db.execute("INSERT INTO backup_settings(server_id,retain_count,max_age_days,updated_at) VALUES(?,?,?,?) "
+                       "ON CONFLICT(server_id) DO UPDATE SET retain_count=excluded.retain_count,max_age_days=excluded.max_age_days,updated_at=excluded.updated_at",
+                       (server_id, retain_count, max_age_days, self._now()))
+        return self.backup_retention(server_id)
 
     def get_server_permissions(self, user_id: int, server_id: int):
         with self._connect() as db:

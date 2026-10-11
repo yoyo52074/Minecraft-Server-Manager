@@ -1,23 +1,32 @@
 import asyncio
+import json
+import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from backup_manager import BackupManager
+from backup_manager import BackupJobManager, BackupManager
 from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS
-from .operations import JavaManager, PlayerManager, Scheduler
+from .operations import JavaManager, MonitorService, PlayerManager, Scheduler
 
 ROLES = {"admin", "operator", "viewer"}
 
 
 def create_app(controller, database_path):
-    app = FastAPI(title="Minecraft Server Manager Web Panel")
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        app.state.scheduler.stop_event.set()
+        app.state.monitor.stop()
+
+    app = FastAPI(title="Minecraft Server Manager Web Panel", lifespan=lifespan)
     db = WebDatabase(database_path)
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
     profiles = ServerProfileStore(db)
@@ -31,7 +40,9 @@ def create_app(controller, database_path):
     app.state.files = files
     app.state.java = JavaManager()
     app.state.players = PlayerManager(multi)
+    app.state.backup_jobs = BackupJobManager()
     app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]))
+    app.state.monitor = MonitorService(profiles, multi, db)
 
     def current_user(request: Request):
         return db.get_session(request.cookies.get("mcm_session"))
@@ -84,6 +95,16 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "settings.view")
         profile = profiles.get(profile_id)
         return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"])
+
+    @app.get("/server/{profile_id}/history", response_class=HTMLResponse)
+    def server_history_page(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "server.view")
+        return render(request, "history.html", profile=profiles.get(profile_id), csrf=user["csrf_token"])
+
+    @app.get("/server/{profile_id}/monitor", response_class=HTMLResponse)
+    def monitor_page(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "resources.view")
+        return render(request, "monitor.html", profile=profiles.get(profile_id), csrf=user["csrf_token"], thresholds=db.alert_thresholds(profile_id), metrics=db.recent_metrics(profile_id, 120), alerts=db.alert_events(profile_id), can_edit_alerts=db.has_server_permission(user, profile_id, "settings.edit"))
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
@@ -158,7 +179,7 @@ def create_app(controller, database_path):
             )
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "create_server", str(profile["id"]))
+        db.audit(user["user_id"], "create_server", str(profile["id"]), server_id=profile["id"])
         return profile
 
     @app.get("/api/servers/{profile_id}")
@@ -178,7 +199,7 @@ def create_app(controller, database_path):
             profile = profiles.update(profile_id, await request.json())
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "update_server", str(profile_id))
+        db.audit(user["user_id"], "update_server", str(profile_id), server_id=profile_id)
         return profile
 
     @app.delete("/api/servers/{profile_id}")
@@ -203,18 +224,6 @@ def create_app(controller, database_path):
         app.state.scheduler.create(profile_id, str(payload.get("name", "排程")), str(payload.get("action", "backup")), int(payload.get("interval_seconds", 3600)))
         return {"ok": True}
 
-    @app.post("/api/servers/{profile_id}/{action}")
-    def server_action(profile_id: int, action: str, request: Request):
-        permission = {"start": "server.start", "stop": "server.stop", "force-stop": "server.force_stop"}.get(action)
-        if not permission:
-            raise HTTPException(status_code=404, detail="未知的操作")
-        user = require_server_permission(request, profile_id, permission)
-        check_csrf(request, user)
-        actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
-        ok, message = actions[action](profile_id)
-        db.audit(user["user_id"], f"server_{action}", str(profile_id))
-        return {"ok": ok, "message": message}
-
     @app.get("/api/servers/{profile_id}/logs")
     def server_logs(profile_id: int, request: Request, limit: int = 200):
         require_server_permission(request, profile_id, "console.view")
@@ -227,13 +236,60 @@ def create_app(controller, database_path):
         require_server_permission(request, profile_id, "resources.view")
         return {"metrics": app.state.db.recent_metrics(profile_id, min(max(limit, 1), 1440))}
 
+    @app.get("/api/servers/{profile_id}/history")
+    def server_history_api(profile_id: int, request: Request, limit: int = 100):
+        user = require_server_permission(request, profile_id, "server.view")
+        limit = min(max(limit, 1), 500)
+        visible_operations = []
+        for entry in db.server_audit_logs(profile_id, limit * 3):
+            action = entry["action"]
+            permission = ("players.view" if action.startswith("player_") else
+                          "backups.view" if "backup" in action else
+                          "settings.view" if "settings" in action else
+                          "files.view" if action.startswith(("file_", "upload_file", "edit_file", "delete_file")) else
+                          "console.view" if action.startswith("console_") else "server.view")
+            if db.has_server_permission(user, profile_id, permission):
+                visible_operations.append(entry)
+            if len(visible_operations) >= limit:
+                break
+        runs = []
+        if db.has_server_permission(user, profile_id, "schedule.view"):
+            with db._connect() as conn:
+                runs = [dict(row) for row in conn.execute("SELECT r.*,COALESCE(r.server_id,s.server_id) AS server_id,COALESCE(r.schedule_name,s.name) AS schedule_name,COALESCE(r.action,s.action) AS action FROM schedule_runs r LEFT JOIN schedules s ON s.id=r.schedule_id WHERE COALESCE(r.server_id,s.server_id)=? ORDER BY r.id DESC LIMIT ?", (profile_id, limit)).fetchall()]
+        return {"operations": visible_operations, "schedule_runs": runs}
+
+    @app.get("/api/servers/{profile_id}/alerts")
+    def get_alerts(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "resources.view")
+        return {"thresholds": db.alert_thresholds(profile_id), "alerts": db.alert_events(profile_id)}
+
+    @app.put("/api/servers/{profile_id}/alerts")
+    async def update_alerts(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "settings.edit")
+        check_csrf(request, user)
+        try:
+            thresholds = db.set_alert_thresholds(profile_id, await request.json())
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "update_alert_thresholds", str(thresholds), server_id=profile_id)
+        return {"thresholds": thresholds}
+
+    @app.post("/api/servers/{profile_id}/alerts/evaluate")
+    def evaluate_alerts(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "resources.view")
+        status = multi.status(profile_id)
+        if status:
+            db.evaluate_metric_alerts(profile_id, status["metrics"])
+            db.evaluate_server_phase(profile_id, status.get("phase"), status.get("phase_timeout"))
+        return {"alerts": db.alert_events(profile_id)}
+
     @app.post("/api/servers/{profile_id}/console")
     async def server_console(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "console.send_command")
         check_csrf(request, user)
         payload = await request.json()
         ok, message = multi.send_command(profile_id, str(payload.get("command", "")))
-        db.audit(user["user_id"], "console_command", f"{profile_id}: {payload.get('command', '')}")
+        db.audit(user["user_id"], "console_command", f"{profile_id}: {payload.get('command', '')}", server_id=profile_id)
         return {"ok": ok, "message": message}
 
     @app.get("/api/servers/{profile_id}/settings")
@@ -269,13 +325,23 @@ def create_app(controller, database_path):
                     raise ValueError
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="伺服器連接埠必須介於 1 到 65535") from exc
+        before_properties = ServerManager(profile["directory"]).get_server_properties()
+        before_profile = {key: profile.get(key) for key in profile_values}
+        try:
+            snapshot = BackupManager(profile["directory"]).create_settings_backup(profile)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"設定安全快照建立失敗，未儲存設定：{exc}") from exc
+        # Save only after the rollback snapshot exists.
         try:
             ServerManager(profile["directory"]).save_server_properties({str(k): str(v) for k, v in properties.items()})
             if profile_values:
                 profiles.update(profile_id, profile_values)
         except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "update_settings", str(profile_id))
+        changes = {"properties": {key: {"from": before_properties.get(key), "to": str(value)} for key, value in properties.items() if before_properties.get(key) != str(value)},
+                   "profile": {key: {"from": before_profile.get(key), "to": value} for key, value in profile_values.items() if before_profile.get(key) != value},
+                   "snapshot": Path(snapshot).name}
+        db.audit(user["user_id"], "update_settings", json.dumps(changes, ensure_ascii=False), server_id=profile_id)
         return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
 
     @app.get("/java", response_class=HTMLResponse)
@@ -306,7 +372,7 @@ def create_app(controller, database_path):
         if action in {"kick","ban","pardon","op","deop","whitelist_add","whitelist_remove"}:
             perm = "players.unban" if action=="pardon" else "players.whitelist" if action.startswith("whitelist") else f"players.{action}"
             require_server_permission(request, profile_id, perm)
-        ok,message=app.state.players.command(profile_id,action,player); db.audit(user["user_id"],"player_"+action,f"{profile_id}:{player}"); return {"ok":ok,"message":message}
+        ok,message=app.state.players.command(profile_id,action,player); db.audit(user["user_id"],"player_"+action,f"{profile_id}:{player}",server_id=profile_id); return {"ok":ok,"message":message}
 
     @app.get("/server/{profile_id}/schedules", response_class=HTMLResponse)
     def schedules_page(profile_id: int, request: Request):
@@ -340,11 +406,52 @@ def create_app(controller, database_path):
         manager = BackupManager(profile["directory"])
         return {"backups": [{"name": Path(path).name, "size": Path(path).stat().st_size, "modified_at": Path(path).stat().st_mtime} for path in manager.list_backups()]}
 
+    @app.get("/api/servers/{profile_id}/backups/retention")
+    def get_backup_retention(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "backups.view")
+        return db.backup_retention(profile_id)
+
+    @app.put("/api/servers/{profile_id}/backups/retention")
+    async def put_backup_retention(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "backups.create")
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            result = db.set_backup_retention(profile_id, payload.get("retain_count", 10), payload.get("max_age_days", 0))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result
+
+    @app.post("/api/servers/{profile_id}/backups/cleanup")
+    def cleanup_backups(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "backups.delete")
+        check_csrf(request, user)
+        profile = profiles.get(profile_id)
+        settings = db.backup_retention(profile_id)
+        removed = BackupManager(profile["directory"]).cleanup_retention(settings["retain_count"], settings["max_age_days"] or None)
+        db.audit(user["user_id"], "cleanup_backups", f"{profile_id}:removed={len(removed)}", server_id=profile_id)
+        return {"removed": [Path(path).name for path in removed]}
+
+    @app.post("/api/servers/{profile_id}/backups/verify")
+    async def verify_backup(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "backups.view")
+        payload = await request.json()
+        profile = profiles.get(profile_id)
+        root = (Path(profile["directory"]) / "backups").resolve()
+        target = (root / str(payload.get("name", ""))).resolve()
+        if target.parent != root or target.suffix.lower() != ".zip":
+            raise HTTPException(status_code=400, detail="無效的備份檔")
+        try:
+            BackupManager(profile["directory"]).verify_backup(str(target))
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True}
+
     @app.get("/server/{profile_id}/backups", response_class=HTMLResponse)
     def backups_page(profile_id:int,request:Request):
         user=require_server_permission(request,profile_id,"backups.view"); profile=profiles.get(profile_id); manager=BackupManager(profile["directory"])
         items=[{"name":Path(p).name,"size":Path(p).stat().st_size,"modified_at":Path(p).stat().st_mtime} for p in manager.list_backups()]
-        return render(request,"backups.html",profile=profile,backups=items,csrf=user["csrf_token"])
+        return render(request,"backups_v2.html",profile=profile,backups=items,csrf=user["csrf_token"])
 
     @app.get("/api/servers/{profile_id}/backups/{name}/download")
     def download_backup(profile_id:int,name:str,request:Request):
@@ -369,9 +476,28 @@ def create_app(controller, database_path):
         if status and status["running"]:
             raise HTTPException(status_code=409, detail="建立備份前建議先停止伺服器")
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        path = BackupManager(profile["directory"]).create_backup(str(payload.get("label", "manual")))
-        db.audit(user["user_id"], "create_backup", f"{profile_id}:{Path(path).name}")
-        return {"ok": True, "name": Path(path).name}
+        settings = db.backup_retention(profile_id)
+        task_id = app.state.backup_jobs.start(profile_id, profile["directory"], str(payload.get("label", "manual")), settings["retain_count"], settings["max_age_days"])
+        db.audit(user["user_id"], "start_backup", f"{profile_id}:task={task_id}", server_id=profile_id)
+        return {"ok": True, "task_id": task_id, "status": "queued"}
+
+    @app.get("/api/servers/{profile_id}/backups/jobs/{task_id}")
+    def get_backup_job(profile_id: int, task_id: str, request: Request):
+        require_server_permission(request, profile_id, "backups.view")
+        job = app.state.backup_jobs.get(task_id, profile_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="找不到備份工作")
+        return job
+
+    @app.post("/api/servers/{profile_id}/backups/jobs/{task_id}/cancel")
+    def cancel_backup_job(profile_id: int, task_id: str, request: Request):
+        user = require_server_permission(request, profile_id, "backups.create")
+        check_csrf(request, user)
+        job = app.state.backup_jobs.cancel(task_id, profile_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="找不到備份工作")
+        db.audit(user["user_id"], "cancel_backup", f"{profile_id}:task={task_id}", server_id=profile_id)
+        return job
 
     @app.post("/api/servers/{profile_id}/backups/restore")
     async def restore_backup(profile_id: int, request: Request):
@@ -388,12 +514,14 @@ def create_app(controller, database_path):
         root = (Path(profile["directory"]) / "backups").resolve()
         if backup.resolve().parent != root or backup.suffix.lower() != ".zip":
             raise HTTPException(status_code=400, detail="無效的備份檔")
+        manager = BackupManager(profile["directory"])
         try:
-            path = BackupManager(profile["directory"]).restore_backup(str(backup))
-        except (OSError, ValueError, FileNotFoundError) as exc:
+            path = manager.restore_backup(str(backup))
+        except (OSError, ValueError, FileNotFoundError, zipfile.BadZipFile) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "restore_backup", f"{profile_id}:{Path(path).name}")
-        return {"ok": True}
+        safety_name = Path(manager.last_pre_restore_backup or "").name
+        db.audit(user["user_id"], "restore_backup", f"{profile_id}:{Path(path).name}; safety={safety_name}", server_id=profile_id)
+        return {"ok": True, "safety_backup": safety_name}
 
     @app.get("/api/servers/{profile_id}/files")
     def list_files(profile_id: int, request: Request, path: str = ""):
@@ -423,7 +551,7 @@ def create_app(controller, database_path):
             target = files.write_upload(profile_id, relative, file)
         except (PermissionError, ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "upload_file", f"{profile_id}:{relative}")
+        db.audit(user["user_id"], "upload_file", f"{profile_id}:{relative}", server_id=profile_id)
         return {"ok": True, "path": target.name}
 
     @app.post("/api/servers/{profile_id}/files/mkdir")
@@ -465,7 +593,7 @@ def create_app(controller, database_path):
             files.write_text(profile_id, payload.get("path", ""), str(payload.get("content", "")))
         except (PermissionError, ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "edit_file", f"{profile_id}:{payload.get('path', '')}")
+        db.audit(user["user_id"], "edit_file", f"{profile_id}:{payload.get('path', '')}", server_id=profile_id)
         return {"ok": True}
 
     @app.post("/api/servers/{profile_id}/files/{operation}")
@@ -487,7 +615,7 @@ def create_app(controller, database_path):
                 raise ValueError("未知的檔案操作")
         except (PermissionError, ValueError, FileNotFoundError, NotADirectoryError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], f"file_{operation}", f"{profile_id}:{payload}")
+        db.audit(user["user_id"], f"file_{operation}", f"{profile_id}:{payload}", server_id=profile_id)
         return {"ok": True, "path": str(target)}
 
     @app.delete("/api/servers/{profile_id}/files")
@@ -499,7 +627,7 @@ def create_app(controller, database_path):
             files.delete(profile_id, payload.get("path", ""))
         except (PermissionError, FileNotFoundError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "delete_file", f"{profile_id}:{payload.get('path', '')}")
+        db.audit(user["user_id"], "delete_file", f"{profile_id}:{payload.get('path', '')}", server_id=profile_id)
         return {"ok": True}
 
     @app.post("/api/server/{action}")
@@ -576,6 +704,19 @@ def create_app(controller, database_path):
             db.set_user_enabled(user_id, not bool(matches[0]["enabled"]))
             db.audit(user["user_id"], "toggle_user", str(user_id))
         return RedirectResponse("/admin/users", status_code=303)
+
+    # Keep the catch-all action route after all explicit /api/servers routes.
+    @app.post("/api/servers/{profile_id}/{action}")
+    def server_action(profile_id: int, action: str, request: Request):
+        permission = {"start": "server.start", "stop": "server.stop", "force-stop": "server.force_stop"}.get(action)
+        if not permission:
+            raise HTTPException(status_code=404, detail="未知的操作")
+        user = require_server_permission(request, profile_id, permission)
+        check_csrf(request, user)
+        actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
+        ok, message = actions[action](profile_id)
+        db.audit(user["user_id"], f"server_{action}", str(profile_id), server_id=profile_id)
+        return {"ok": ok, "message": message}
 
     @app.websocket("/ws/logs")
     async def logs_socket(websocket: WebSocket):

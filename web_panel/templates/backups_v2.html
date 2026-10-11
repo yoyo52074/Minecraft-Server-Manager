@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block title %}{{ profile.name }}｜備份中心{% endblock %}
+{% block content %}
+<main class="wrap">
+  <p><a href="/server/{{ profile.id }}">← 返回伺服器</a></p>
+  <h1>{{ profile.name }}｜備份中心</h1>
+  <section class="card">
+    <h2>保留與清理</h2><p class="muted">手動或排程建立備份後將套用保留策略；最多保存天數設為 0 表示不限。</p>
+    <div class="grid"><label>保留最新數量<input id="retain" type="number" min="1" max="1000" value="10"></label><label>最多保存天數（0＝不限）<input id="age" type="number" min="0" max="36500" value="0"></label></div>
+    <button onclick="saveRetention()">儲存策略</button> <button class="secondary" onclick="cleanup()">立即清理</button>
+    <form id="create" style="margin-top:18px"><label>備份名稱<input id="label" value="manual" maxlength="64"></label><button>立即建立備份</button></form>
+    <p id="msg" class="muted" aria-live="polite"></p><div id="job-progress" class="progress" hidden><i id="job-bar"></i></div><p id="job-file" class="small muted"></p><button id="cancel-job" class="danger" hidden onclick="cancelJob()">取消備份</button>
+    <h2>備份清單</h2><table class="table"><thead><tr><th>檔名</th><th>大小</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
+    {% for b in backups %}<tr><td>{{ b.name }}</td><td>{{ b.size }} bytes</td><td>{{ b.modified_at|int }}</td><td><a class="button secondary" href="/api/servers/{{ profile.id }}/backups/{{ b.name }}/download">下載</a> <button class="secondary" onclick="verifyBackup('{{ b.name }}')">驗證</button> <button class="danger" onclick="removeBackup('{{ b.name }}')">刪除</button> <button onclick="restoreBackup('{{ b.name }}')">還原</button></td></tr>{% else %}<tr><td colspan="4">尚未建立備份</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+</main>
+<script>
+const id={{ profile.id }},csrf={{ csrf|tojson }},headers={'content-type':'application/json','x-csrf-token':csrf},msg=document.getElementById('msg');
+async function loadRetention(){const r=await fetch(`/api/servers/${id}/backups/retention`);if(r.ok){const d=await r.json();document.getElementById('retain').value=d.retain_count;document.getElementById('age').value=d.max_age_days}}
+async function saveRetention(){const r=await fetch(`/api/servers/${id}/backups/retention`,{method:'PUT',headers,body:JSON.stringify({retain_count:Number(document.getElementById('retain').value),max_age_days:Number(document.getElementById('age').value)})}),d=await r.json();msg.textContent=r.ok?'保留策略已儲存':(d.detail||'儲存失敗')}
+async function cleanup(){const r=await fetch(`/api/servers/${id}/backups/cleanup`,{method:'POST',headers}),d=await r.json();msg.textContent=r.ok?`清理完成，移除 ${d.removed.length} 個備份`:(d.detail||'清理失敗');if(r.ok)location.reload()}
+let activeJob='';document.getElementById('create').onsubmit=async e=>{e.preventDefault();const r=await fetch(`/api/servers/${id}/backups`,{method:'POST',headers,body:JSON.stringify({label:document.getElementById('label').value})}),d=await r.json();if(!r.ok){msg.textContent=d.detail||'建立失敗';return}activeJob=d.task_id;document.getElementById('job-progress').hidden=false;document.getElementById('cancel-job').hidden=false;pollJob()};
+async function pollJob(){if(!activeJob)return;const r=await fetch(`/api/servers/${id}/backups/jobs/${activeJob}`),d=await r.json();if(!r.ok){msg.textContent=d.detail||'無法讀取工作狀態';return}const percent=d.total?Math.round(d.completed/d.total*100):0;document.getElementById('job-bar').style.width=percent+'%';document.getElementById('job-file').textContent=d.current_file?`處理中：${d.current_file}`:'';msg.textContent=`備份狀態：${d.status}（${d.completed}/${d.total}，${percent}%）`;if(['completed','failed','cancelled'].includes(d.status)){document.getElementById('cancel-job').hidden=true;if(d.status==='completed'){msg.textContent=`備份完成：${d.filename}`;setTimeout(()=>location.reload(),700)}else if(d.error)msg.textContent=`備份失敗：${d.error}`;return}setTimeout(pollJob,700)}
+async function cancelJob(){if(!activeJob)return;document.getElementById('cancel-job').disabled=true;await fetch(`/api/servers/${id}/backups/jobs/${activeJob}/cancel`,{method:'POST',headers});msg.textContent='正在取消備份…'}
+async function verifyBackup(name){const r=await fetch(`/api/servers/${id}/backups/verify`,{method:'POST',headers,body:JSON.stringify({name})}),d=await r.json();msg.textContent=r.ok?`${name} 完整性驗證通過`:(d.detail||'驗證失敗')}
+async function removeBackup(name){if(!confirm(`確定刪除備份 ${name}？`))return;const r=await fetch(`/api/servers/${id}/backups/${encodeURIComponent(name)}`,{method:'DELETE',headers}),d=await r.json();msg.textContent=r.ok?'備份已刪除':(d.detail||'刪除失敗');if(r.ok)location.reload()}
+async function restoreBackup(name){if(!confirm(`還原 ${name}？還原前會先建立目前資料的安全備份。`))return;const r=await fetch(`/api/servers/${id}/backups/restore`,{method:'POST',headers,body:JSON.stringify({name})}),d=await r.json();msg.textContent=r.ok?`還原完成。還原前安全備份：${d.safety_backup}`:(d.detail||'還原失敗')}
+loadRetention();
+</script>
+{% endblock %}
