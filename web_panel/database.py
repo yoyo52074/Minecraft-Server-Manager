@@ -199,16 +199,53 @@ class WebDatabase:
 
     def set_user_enabled(self, user_id: int, enabled: bool):
         with self._connect() as db:
+            current = db.execute("SELECT role,enabled FROM users WHERE id=?", (user_id,)).fetchone()
+            if current and current["role"] == "admin" and current["enabled"] and not enabled:
+                if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
+                    raise ValueError("不能停用最後一位啟用中的管理員")
             db.execute("UPDATE users SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), self._now(), user_id))
 
     def set_user_role(self, user_id: int, role: str):
         if role not in {"admin", "operator", "viewer"}:
             raise ValueError("無效的角色")
         with self._connect() as db:
+            current = db.execute("SELECT role,enabled FROM users WHERE id=?", (user_id,)).fetchone()
+            if current and current["role"] == "admin" and current["enabled"] and role != "admin":
+                if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
+                    raise ValueError("不能變更最後一位啟用中管理員的角色")
             db.execute("UPDATE users SET role = ?, updated_at = ? WHERE id = ?", (role, self._now(), user_id))
+
+    def update_user(self, user_id: int, username: str, password: str = "", role: str | None = None):
+        username = username.strip()
+        if not username or len(username) > 64:
+            raise ValueError("帳號長度必須為 1 到 64 個字元")
+        if password and len(password) < 12:
+            raise ValueError("新密碼至少需要 12 個字元")
+        if role is not None and role not in {"admin", "operator", "viewer"}:
+            raise ValueError("無效的角色")
+        now = self._now()
+        password_hash = self.password_hasher.hash(password) if password else None
+        with self._connect() as db:
+            current = db.execute("SELECT role,enabled FROM users WHERE id=?", (user_id,)).fetchone()
+            if not current:
+                raise ValueError("找不到使用者")
+            if role is not None and current["role"] == "admin" and current["enabled"] and role != "admin":
+                if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
+                    raise ValueError("不能變更最後一位啟用中管理員的角色")
+            if password_hash:
+                db.execute("UPDATE users SET username=?,role=COALESCE(?,role),password_hash=?,updated_at=? WHERE id=?", (username, role, password_hash, now, user_id))
+                db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            else:
+                db.execute("UPDATE users SET username=?,role=COALESCE(?,role),updated_at=? WHERE id=?", (username, role, now, user_id))
+        return username
 
     def delete_user(self, user_id: int):
         with self._connect() as db:
+            user = db.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                raise ValueError("找不到使用者")
+            if user["role"] == "admin" and db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
+                raise ValueError("不能刪除最後一位啟用中的管理員")
             db.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     def audit(self, user_id, action: str, detail: str = "", server_id=None):

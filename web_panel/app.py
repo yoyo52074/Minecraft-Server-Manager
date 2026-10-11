@@ -13,7 +13,7 @@ from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
-from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS
+from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import JavaManager, MonitorService, PlayerManager, Scheduler
 
 ROLES = {"admin", "operator", "viewer"}
@@ -656,7 +656,7 @@ def create_app(controller, database_path):
     @app.get("/admin/users", response_class=HTMLResponse)
     def admin_users(request: Request):
         user = require_user(request, {"admin"})
-        return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=None)
+        return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=None, role_labels={"admin": "管理員", "operator": "操作者", "viewer": "檢視者"})
 
     @app.post("/admin/users")
     def create_managed_user(request: Request, username: str = Form(...), password: str = Form(...), role: str = Form(...), csrf: str = Form(...)):
@@ -667,7 +667,46 @@ def create_app(controller, database_path):
             new_id = db.create_user(username, password, role)
             db.audit(user["user_id"], "create_user", username)
         except Exception as exc:
-            return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=str(exc))
+            return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=str(exc), role_labels={"admin": "管理員", "operator": "操作者", "viewer": "檢視者"})
+        return RedirectResponse("/admin/users", status_code=303)
+
+    @app.post("/admin/users/{user_id}/edit")
+    def edit_managed_user(user_id: int, request: Request, username: str = Form(...), password: str = Form(""), role: str = Form(...), csrf: str = Form(...)):
+        admin = require_user(request, {"admin"})
+        if csrf != admin["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
+        if role not in ROLES:
+            raise HTTPException(status_code=400, detail="角色選擇無效")
+        try:
+            old = next((entry for entry in db.list_users() if entry["id"] == user_id), None)
+            if not old:
+                raise ValueError("找不到使用者")
+            db.update_user(user_id, username, password, role)
+            db.audit(admin["user_id"], "update_user", f"id={user_id},username={username},password_changed={bool(password)},role={role}")
+            if password and user_id == admin["user_id"]:
+                response = RedirectResponse("/login", status_code=303)
+                response.delete_cookie("mcm_session")
+                response.delete_cookie("mcm_csrf")
+                return response
+        except Exception as exc:
+            return render(request, "admin_users.html", users=db.list_users(), csrf=admin["csrf_token"], error=str(exc), role_labels={"admin": "管理員", "operator": "操作者", "viewer": "檢視者"})
+        return RedirectResponse("/admin/users", status_code=303)
+
+    @app.post("/admin/users/{user_id}/delete")
+    def delete_managed_user(user_id: int, request: Request, csrf: str = Form(...)):
+        admin = require_user(request, {"admin"})
+        if csrf != admin["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
+        if user_id == admin["user_id"]:
+            raise HTTPException(status_code=400, detail="不能刪除目前登入中的帳號")
+        entry = next((item for item in db.list_users() if item["id"] == user_id), None)
+        if not entry:
+            raise HTTPException(status_code=404, detail="找不到使用者")
+        try:
+            db.delete_user(user_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(admin["user_id"], "delete_user", f"id={user_id},username={entry['username']}")
         return RedirectResponse("/admin/users", status_code=303)
 
     @app.get("/admin/users/{user_id}/permissions", response_class=HTMLResponse)
@@ -677,7 +716,7 @@ def create_app(controller, database_path):
         if not matches:
             raise HTTPException(status_code=404, detail="找不到使用者")
         server_rows = [{"profile": profile, "selected": db.get_server_permissions(user_id, profile["id"])} for profile in profiles.list()]
-        return render(request, "permissions.html", managed_user=matches[0], servers=server_rows, groups=PERMISSION_GROUPS, csrf=admin["csrf_token"])
+        return render(request, "permissions.html", managed_user=matches[0], servers=server_rows, groups=PERMISSION_GROUPS, labels=PERMISSION_LABELS, role_presets={key: sorted(value) for key, value in ROLE_DEFAULTS.items()}, csrf=admin["csrf_token"])
 
     @app.post("/admin/users/{user_id}/permissions")
     async def save_permissions(user_id: int, request: Request):
@@ -690,6 +729,10 @@ def create_app(controller, database_path):
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="伺服器選擇錯誤") from exc
         selected = form.getlist("permissions")
+        if not any(item["id"] == user_id for item in db.list_users()):
+            raise HTTPException(status_code=404, detail="找不到使用者")
+        if not any(item["id"] == server_id for item in profiles.list()):
+            raise HTTPException(status_code=404, detail="找不到伺服器")
         db.set_server_permissions(user_id, server_id, selected)
         db.audit(admin["user_id"], "set_server_permissions", f"user={user_id},server={server_id},count={len(selected)}")
         return RedirectResponse(f"/admin/users/{user_id}/permissions?server_id={server_id}", status_code=303)

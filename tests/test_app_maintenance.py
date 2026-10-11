@@ -98,6 +98,48 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200, history.text)
         self.assertTrue(any(row["action"] == "update_alert_thresholds" for row in history.json()["operations"]))
 
+    def test_account_edit_password_reset_and_delete(self):
+        managed_id = self.app.state.db.create_user("old-name", "Old-password-123", "viewer")
+        managed_session, _ = self.app.state.db.create_session(managed_id)
+        edited = self.client.post(f"/admin/users/{managed_id}/edit", data={
+            "csrf": self.csrf, "username": "new-name", "role": "operator", "password": "New-password-456"
+        }, follow_redirects=False)
+        self.assertEqual(edited.status_code, 303)
+        self.assertIsNone(self.app.state.db.get_session(managed_session))
+        self.assertIsNone(self.app.state.db.authenticate("old-name", "Old-password-123"))
+        self.assertEqual(self.app.state.db.authenticate("new-name", "New-password-456")["role"], "operator")
+        deleted = self.client.post(f"/admin/users/{managed_id}/delete", data={"csrf": self.csrf}, follow_redirects=False)
+        self.assertEqual(deleted.status_code, 303)
+        self.assertNotIn(managed_id, [entry["id"] for entry in self.app.state.db.list_users()])
+
+    def test_admin_user_page_and_chinese_permission_checkboxes(self):
+        managed_id = self.app.state.db.create_user("helper", "Helper-password-123", "viewer")
+        response = self.client.get("/admin/users")
+        self.assertEqual(response.status_code, 200)
+        for text in ("編輯帳號資料", "重設密碼", "永久刪除帳號", "檢視者"):
+            self.assertIn(text, response.text)
+        permissions = self.client.get(f"/admin/users/{managed_id}/permissions")
+        self.assertEqual(permissions.status_code, 200)
+        for text in ("查看伺服器狀態", "重新啟動伺服器", "全部勾選", "套用檢視者預設"):
+            self.assertIn(text, permissions.text)
+        self.assertRegex(permissions.text, r'value="server\.start"\s*(?!checked)')
+        saved = self.client.post(f"/admin/users/{managed_id}/permissions", data={
+            "csrf": self.csrf, "server_id": str(self.profile_id),
+            "permissions": ["server.view", "server.start", "resources.view"]
+        }, follow_redirects=False)
+        self.assertEqual(saved.status_code, 303)
+        self.assertEqual(self.app.state.db.get_server_permissions(managed_id, self.profile_id),
+                         {"server.view", "server.start", "resources.view"})
+
+    def test_protect_last_admin_from_demotion_and_deletion(self):
+        current_id = next(entry["id"] for entry in self.app.state.db.list_users() if entry["username"] == "admin")
+        with self.assertRaisesRegex(ValueError, "最後一位"):
+            self.app.state.db.set_user_role(current_id, "viewer")
+        with self.assertRaisesRegex(ValueError, "最後一位"):
+            self.app.state.db.set_user_enabled(current_id, False)
+        with self.assertRaisesRegex(ValueError, "最後一位"):
+            self.app.state.db.delete_user(current_id)
+
 
 if __name__ == "__main__":
     unittest.main()

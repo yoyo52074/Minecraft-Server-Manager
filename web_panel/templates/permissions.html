@@ -1,1 +1,26 @@
-{% extends 'base.html' %}{% block title %}權限管理{% endblock %}{% block content %}<main class="wrap"><p><a href="/admin/users">← 返回帳號管理</a></p><h1>權限管理：{{ managed_user.username }}</h1><p class="muted">每個帳號、每台伺服器、每項功能分開設定；未勾選即拒絕。</p>{% for row in servers %}<section class="card" style="margin-top:16px"><h2>{{ row.profile.name }} <span class="muted small">{{ row.profile.core_type }}｜{{ row.profile.directory }}</span></h2><form method="post" action="/admin/users/{{ managed_user.id }}/permissions"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="server_id" value="{{ row.profile.id }}"><div class="grid">{% for group, keys in groups.items() %}<fieldset class="card"><legend>{{ group }}</legend>{% for key in keys %}<label><input type="checkbox" name="permissions" value="{{ key }}" {% if key in row.selected %}checked{% endif %}> {{ key }}</label>{% endfor %}</fieldset>{% endfor %}</div><button>儲存 {{ row.profile.name }} 權限</button></form></section>{% else %}<p class="muted">目前沒有伺服器 Profile。</p>{% endfor %}</main>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}權限設定{% endblock %}
+{% block content %}
+<main class="wrap">
+<style>
+.permission-intro{max-width:900px}.permission-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,285px),1fr));gap:12px;margin:14px 0}.permission-group{min-width:0;padding:14px 16px;background:#151b22;border:1px solid var(--border);border-radius:10px}.permission-group legend{font-size:16px;font-weight:700;padding:0 6px}.permission-check{display:flex;align-items:flex-start;gap:9px;padding:7px 4px;color:var(--text);cursor:pointer}.permission-check input{width:17px;height:17px;margin:2px 0 0;flex:0 0 auto;accent-color:var(--accent)}.group-actions{display:flex;gap:8px;justify-content:flex-end}.group-actions button{padding:6px 9px;font-size:12px}.server-card{margin-top:18px}.permission-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}.permission-toolbar .muted{margin-right:auto}
+</style>
+<p><a href="/admin/users">← 返回帳號管理</a></p><h1>權限設定：{{ managed_user.username }}</h1>
+<section class="card permission-intro"><p>選取此帳號在每台伺服器可使用的功能。<strong>未勾選的功能一律禁止</strong>；管理員角色本身不受細部勾選限制。</p><p class="muted">可按分類全選或清除，也可快速套用「檢視者」或「操作者」預設，再逐項調整。每台伺服器需分別儲存。</p></section>
+{% for row in servers %}<section class="card server-card"><h2>{{ row.profile.name }} <span class="muted small">{{ row.profile.core_type }} · {{ row.profile.directory }}</span></h2>
+<form method="post" action="/admin/users/{{ managed_user.id }}/permissions" class="permission-form"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="server_id" value="{{ row.profile.id }}">
+<div class="permission-toolbar"><span class="muted">已選 <b class="selected-count">{{ row.selected|length }}</b> 項</span><button type="button" class="secondary" onclick="applyPreset(this,'viewer')">套用檢視者預設</button><button type="button" class="secondary" onclick="applyPreset(this,'operator')">套用操作者預設</button><button type="button" class="secondary" onclick="setAll(this,true)">全部勾選</button><button type="button" class="secondary" onclick="setAll(this,false)">全部清除</button></div>
+<div class="permission-grid">{% for group, keys in groups.items() %}<fieldset class="permission-group"><legend>{{ group }}</legend><div class="group-actions"><button type="button" class="secondary" onclick="setGroup(this,true)">全選</button><button type="button" class="secondary" onclick="setGroup(this,false)">清除</button></div>{% for key in keys %}<label class="permission-check"><input type="checkbox" name="permissions" value="{{ key }}" {% if key in row.selected %}checked{% endif %}><span>{{ labels.get(key,key) }}</span></label>{% endfor %}</fieldset>{% endfor %}</div>
+<button>儲存此伺服器權限</button>
+</form></section>{% else %}<p class="muted">目前沒有伺服器 Profile。</p>{% endfor %}
+</main>
+<script>
+const presets={{ role_presets|tojson }};
+function formOf(button){return button.closest('form')}
+function updateCount(form){form.querySelector('.selected-count').textContent=form.querySelectorAll('input[name="permissions"]:checked').length}
+function setGroup(button,value){const group=button.closest('fieldset');group.querySelectorAll('input[type="checkbox"]').forEach(x=>x.checked=value);updateCount(formOf(button))}
+function setAll(button,value){formOf(button).querySelectorAll('input[type="checkbox"]').forEach(x=>x.checked=value);updateCount(formOf(button))}
+function applyPreset(button,role){const form=formOf(button),selected=new Set(presets[role]||[]);form.querySelectorAll('input[name="permissions"]').forEach(x=>x.checked=selected.has(x.value));updateCount(form)}
+document.querySelectorAll('.permission-form').forEach(form=>form.addEventListener('change',()=>updateCount(form)));
+</script>
+{% endblock %}
