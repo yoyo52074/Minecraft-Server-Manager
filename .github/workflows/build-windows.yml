@@ -48,14 +48,38 @@ jobs:
           }
           Get-Item "dist/Minecraft-Server-Manager.exe" | Format-List Name,Length,FullName
 
+      - name: Build console diagnostic EXE
+        shell: pwsh
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --console
+          --name Minecraft-Server-Manager-smoke
+          --icon my_logo.ico
+          --add-binary "playit.exe;."
+          --collect-all ttkbootstrap
+          --collect-all uvicorn
+          --collect-all fastapi
+          --collect-all argon2
+          --add-data "web_panel/templates;web_panel/templates"
+          --hidden-import requests
+          --hidden-import multipart
+          main.py
+
       - name: Run EXE smoke test
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath "dist/Minecraft-Server-Manager.exe" -WorkingDirectory "dist" -PassThru
+          $stdout = Join-Path $env:RUNNER_TEMP "mcm-smoke.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "mcm-smoke.stderr.log"
+          $process = Start-Process -FilePath "dist/Minecraft-Server-Manager-smoke.exe" -WorkingDirectory "dist" -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           try {
             $ready = $false
             for ($i = 0; $i -lt 20; $i++) {
               Start-Sleep -Seconds 1
+              if ($process.HasExited) {
+                Write-Host "Smoke EXE exited with code $($process.ExitCode)"
+                if (Test-Path $stdout) { Get-Content $stdout }
+                if (Test-Path $stderr) { Get-Content $stderr }
+                throw "Smoke EXE exited before Web panel became ready"
+              }
               try {
                 $response = Invoke-WebRequest -Uri "http://127.0.0.1:8765/login" -UseBasicParsing -TimeoutSec 2
                 if ($response.StatusCode -eq 200 -and $response.Content -match "建立第一位管理員") {
@@ -67,6 +91,8 @@ jobs:
               }
             }
             if (-not $ready) {
+              if (Test-Path $stdout) { Get-Content $stdout }
+              if (Test-Path $stderr) { Get-Content $stderr }
               throw "EXE started but Web panel did not respond on http://127.0.0.1:8765/login"
             }
             Write-Host "EXE smoke test passed: Web panel responded on port 8765"
