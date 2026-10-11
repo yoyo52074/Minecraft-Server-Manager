@@ -86,6 +86,7 @@ class ApplicationController:
                 port=self.web_panel_port,
                 log_level="warning",
                 access_log=False,
+                log_config=None,
             ))
             self.web_thread = threading.Thread(
                 target=self._run_web_server,
