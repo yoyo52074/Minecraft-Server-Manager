@@ -179,6 +179,7 @@ class MultiServerManager:
         self._logs = {}
         self._started_at = {}
         self._phases = {}
+        self._phase_at = {}
 
     def _is_legacy(self, profile):
         return self.legacy_bridge and str(Path(profile["directory"]).resolve()) == str(Path(self.legacy_bridge.controller.server_directory).resolve())
@@ -189,7 +190,13 @@ class MultiServerManager:
             return None
         if self._is_legacy(profile):
             result = self.legacy_bridge.status()
-            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": "running" if result.get("running") else "stopped"})
+            phase = "running" if result.get("running") else self._phases.get(profile_id, "stopped")
+            if not result.get("running") and phase in {"starting", "stopping"}:
+                timeout = 30 if phase == "starting" else 15
+                if time.time() - self._phase_at.get(profile_id, 0) > timeout:
+                    phase = "error" if phase == "starting" else "stopped"
+                    self._phases[profile_id] = phase
+            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase})
             result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"])
             return result
         process = self._processes.get(profile_id)
@@ -254,7 +261,11 @@ class MultiServerManager:
         if not profile:
             return False, "找不到伺服器"
         if self._is_legacy(profile):
-            return self.legacy_bridge.start()
+            ok, message = self.legacy_bridge.start()
+            if ok:
+                self._phases[profile_id] = "starting"
+                self._phase_at[profile_id] = time.time()
+            return ok, message
         with self._lock:
             current = self._processes.get(profile_id)
             if current and current.poll() is None:
@@ -275,6 +286,7 @@ class MultiServerManager:
             self._processes[profile_id] = process
             self._started_at[profile_id] = time.time()
             self._phases[profile_id] = "running"
+            self._phase_at[profile_id] = time.time()
             self._logs.setdefault(profile_id, []).append("---------- 伺服器正在啟動 ----------")
             threading.Thread(target=self._read_output, args=(profile_id, process), daemon=True).start()
             return True, "已送出啟動要求"
@@ -294,11 +306,16 @@ class MultiServerManager:
         if not profile:
             return False, "找不到伺服器"
         if self._is_legacy(profile):
-            return self.legacy_bridge.stop()
+            ok, message = self.legacy_bridge.stop()
+            if ok:
+                self._phases[profile_id] = "stopping"
+                self._phase_at[profile_id] = time.time()
+            return ok, message
         process = self._processes.get(profile_id)
         if not process or process.poll() is not None:
             return False, "伺服器目前沒有運行"
         self._phases[profile_id] = "stopping"
+        self._phase_at[profile_id] = time.time()
         try:
             if force:
                 process.kill()
@@ -319,6 +336,11 @@ class MultiServerManager:
             return False, "伺服器目前沒有運行"
         if not command.strip() or len(command) > 512:
             return False, "指令不可為空或超過 512 個字元"
-        process.stdin.write(command.strip() + "\n")
-        process.stdin.flush()
+        if not process.stdin:
+            return False, "伺服器主控台輸入串流不可用"
+        try:
+            process.stdin.write(command.strip() + "\n")
+            process.stdin.flush()
+        except (OSError, BrokenPipeError) as exc:
+            return False, f"指令發送失敗：{exc}"
         return True, "指令已送出"

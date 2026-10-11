@@ -73,6 +73,11 @@ class ServerBridge:
         if not process or process.poll() is not None:
             return False, "伺服器目前沒有運行"
         with self._lock:
-            process.stdin.write(command + "\n")
-            process.stdin.flush()
+            if not process.stdin:
+                return False, "伺服器主控台輸入串流不可用"
+            try:
+                process.stdin.write(command + "\n")
+                process.stdin.flush()
+            except (OSError, BrokenPipeError) as exc:
+                return False, f"指令發送失敗：{exc}"
         return True, "指令已送出"
