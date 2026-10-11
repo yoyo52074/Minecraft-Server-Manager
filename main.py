@@ -7,6 +7,7 @@ import zipfile
 import shutil
 import re
 import time
+import traceback
 import requests
 from tkinter import messagebox, filedialog
 
@@ -34,6 +35,7 @@ class ApplicationController:
         self.diagnostics = ServerDiagnostics(self.server_directory)
         self.web_panel_host = config.get("web_host", "127.0.0.1")
         self.web_panel_port = int(config.get("web_port", 8765))
+        self.web_startup_log_path = os.path.join(self.app_directory, "web_panel_startup.log")
         self.web_bridge = ServerBridge(self)
         self.web_bridge.attach()
         self.web_server = None
@@ -70,6 +72,10 @@ class ApplicationController:
 
     def start_web_panel(self):
         """Run the authenticated local web panel beside the desktop UI."""
+        self.write_web_startup_log(
+            f"START host={self.web_panel_host} port={self.web_panel_port} "
+            f"app_directory={self.app_directory}"
+        )
         try:
             from uvicorn import Config, Server
 
@@ -81,13 +87,33 @@ class ApplicationController:
                 log_level="warning",
                 access_log=False,
             ))
-            self.web_thread = threading.Thread(target=self.web_server.run, daemon=True)
+            self.web_thread = threading.Thread(
+                target=self._run_web_server,
+                name="minecraft-web-panel",
+                daemon=True,
+            )
             self.web_thread.start()
+            self.write_web_startup_log("THREAD_STARTED")
             print(f"Web panel started: http://{self.web_panel_host}:{self.web_panel_port}")
         except Exception as exc:
             self.web_server = None
             self.web_thread = None
+            self.write_web_startup_log(f"START_FAILED {exc}\n{traceback.format_exc()}")
             print(f"Web panel failed to start: {exc}")
+
+    def _run_web_server(self):
+        try:
+            self.web_server.run()
+            self.write_web_startup_log("SERVER_STOPPED")
+        except Exception as exc:
+            self.write_web_startup_log(f"SERVER_FAILED {exc}\n{traceback.format_exc()}")
+
+    def write_web_startup_log(self, message):
+        try:
+            with open(self.web_startup_log_path, "a", encoding="utf-8") as file:
+                file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+        except Exception:
+            pass
 
     def stop_web_panel(self):
         if self.web_server:
