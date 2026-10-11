@@ -6,6 +6,11 @@ import time
 import zipfile
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional until installed
+    psutil = None
+
 
 CORE_TYPES = {"Vanilla", "Paper", "Forge", "Fabric"}
 
@@ -183,7 +188,8 @@ class MultiServerManager:
             return None
         if self._is_legacy(profile):
             result = self.legacy_bridge.status()
-            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"]})
+            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100)})
+            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process)
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -196,7 +202,22 @@ class MultiServerManager:
             "running": running,
             "uptime_seconds": int(time.time() - self._started_at[profile_id]) if running and profile_id in self._started_at else 0,
             "logs": self._logs.get(profile_id, [])[-100:],
+            "metrics": self._metrics(process),
         }
+
+    @staticmethod
+    def _metrics(process):
+        if not process or process.poll() is not None or psutil is None:
+            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0}
+        try:
+            proc = psutil.Process(process.pid)
+            return {
+                "cpu_percent": round(proc.cpu_percent(interval=None), 1),
+                "memory_mb": round(proc.memory_info().rss / 1024 / 1024, 1),
+                "memory_percent": round(proc.memory_percent(), 1),
+            }
+        except (psutil.Error, OSError):
+            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0}
 
     def statuses(self):
         return [self.status(item["id"]) for item in self.store.list()]

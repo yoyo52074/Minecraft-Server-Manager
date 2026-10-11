@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -409,6 +410,28 @@ def create_app(controller, database_path):
                     for line in logs[last:]:
                         await websocket.send_json({"line": line})
                     last = len(logs)
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/ws/servers")
+    async def servers_socket(websocket: WebSocket):
+        session = db.get_session(websocket.cookies.get("mcm_session"))
+        if not session:
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        try:
+            previous = None
+            while True:
+                snapshot = multi.statuses()
+                compact = repr(snapshot)
+                if compact != previous:
+                    await websocket.send_json({"type": "servers", "servers": snapshot})
+                    previous = compact
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
         except WebSocketDisconnect:
             return
 
