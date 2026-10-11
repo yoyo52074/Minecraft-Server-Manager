@@ -6,11 +6,37 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
+import requests
+
+
+def _allowed_webhook_url(url):
+    parsed = urlparse(str(url))
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").casefold()
+    allowed_path = ((host == "discord.com" and parsed.path.startswith("/api/webhooks/"))
+                    or (host == "hooks.slack.com" and parsed.path.startswith("/services/")))
+    return (parsed.scheme == "https" and allowed_path and not parsed.username and not parsed.password
+            and port in (None, 443) and len(str(url)) <= 500)
+
+
+def _post_webhook(url, payload):
+    if not _allowed_webhook_url(url):
+        return False
+    try:
+        with requests.post(url, json=payload, headers={"User-Agent": "MinecraftServerManager/1.0"},
+                           timeout=8, allow_redirects=False) as response:
+            if response.is_redirect:
+                return False
+            response.raise_for_status()
+        return True
+    except (OSError, requests.RequestException, ValueError):
+        return False
 
 
 class PlayerManager:
@@ -81,9 +107,8 @@ class Scheduler:
     def _validated_webhook(url):
         url=str(url or '').strip()
         if not url:return ''
-        parsed=urlparse(url)
-        if parsed.scheme!='https' or not ((parsed.hostname=='discord.com' and parsed.path.startswith('/api/webhooks/')) or (parsed.hostname=='hooks.slack.com' and parsed.path.startswith('/services/'))):raise ValueError('通知只接受 Discord 或 Slack 的 HTTPS Webhook URL')
-        return url[:500]
+        if not _allowed_webhook_url(url):raise ValueError('通知只接受 Discord 或 Slack 的 HTTPS Webhook URL（443 port、無帳密資訊、最多 500 字元）')
+        return url
     @staticmethod
     def _next_run(now,kind,interval,run_time='',weekdays=None):
         if kind=='interval':return now+interval
@@ -204,10 +229,7 @@ class Scheduler:
     def _notify(self,url,text):
         if not url:return
         payload={'content':text} if urlparse(url).hostname=='discord.com' else {'text':text}
-        request=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','User-Agent':'MinecraftServerManager/1.0'},method='POST')
-        try:
-            with urllib.request.urlopen(request,timeout=8) as response:response.read(1024)
-        except (OSError,urllib.error.URLError):pass
+        _post_webhook(url,payload)
     def _run_item(self,item):
         started=time.time();attempts=0;result='error';detail='';maximum=int(item.get('retry_count',0))+1
         for attempt in range(maximum):
@@ -322,10 +344,7 @@ class MonitorService:
         if not url:return
         messages='\n'.join('• '+event['message'] for event in events)
         payload={'content':f'Minecraft Server Manager 告警\n{messages}'} if urlparse(url).hostname=='discord.com' else {'text':f'Minecraft Server Manager 告警\n{messages}'}
-        request=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','User-Agent':'MinecraftServerManager/1.0'},method='POST')
-        try:
-            with urllib.request.urlopen(request,timeout=8) as response:response.read(1024)
-        except (OSError,urllib.error.URLError):pass
+        _post_webhook(url,payload)
     def _loop(self):
         while not self.stop_event.is_set():
             for profile in self.profiles.list():

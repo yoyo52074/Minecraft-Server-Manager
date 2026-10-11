@@ -2,8 +2,10 @@ import os
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from starlette.websockets import WebSocketDisconnect
 
 from fastapi.testclient import TestClient
 from web_panel.app import create_app
@@ -50,6 +52,7 @@ class MaintenanceApiTests(unittest.TestCase):
         self.app = create_app(FakeController(self.server_dir), os.path.join(self.temp.name, "panel.db"))
         user_id = self.app.state.db.create_user("admin", "A-strong-password-123", "admin")
         session_id, self.csrf = self.app.state.db.create_session(user_id)
+        self.session_id = session_id
         self.profile_id = self.app.state.profiles.list()[0]["id"]
         self.client = TestClient(self.app)
         self.client.cookies.set("mcm_session", session_id)
@@ -88,6 +91,9 @@ class MaintenanceApiTests(unittest.TestCase):
     def test_dashboard_has_safe_server_remove_action(self):
         response=self.client.get("/")
         self.assertEqual(response.status_code,200)
+        self.assertNotIn("Windows 多伺服器管理面板",response.text)
+        self.assertNotIn("支援 Vanilla、Paper、Forge、Fabric",response.text)
+        self.assertIn('id="live"',response.text)
         self.assertIn("移除伺服器",response.text)
         self.assertIn("世界檔案會保留",response.text)
         self.assertIn("delete_files:false",response.text)
@@ -223,6 +229,102 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(restored.status_code, 200, restored.text)
         self.assertTrue(restored.json()["safety_backup"])
 
+    def test_delete_backup_requires_csrf_token(self):
+        backup_dir=Path(self.server_dir)/"backups"
+        backup_dir.mkdir(exist_ok=True)
+        backup=backup_dir/"csrf-check.zip"
+        with zipfile.ZipFile(backup,"w") as archive:
+            archive.writestr("server.properties","motd=test\n")
+        url=f"/api/servers/{self.profile_id}/backups/{backup.name}"
+        denied=self.client.delete(url,headers={"x-csrf-token":"invalid-token"})
+        self.assertEqual(denied.status_code,403)
+        self.assertTrue(backup.is_file())
+        allowed=self.client.delete(url,headers={"x-csrf-token":self.csrf})
+        self.assertEqual(allowed.status_code,200,allowed.text)
+        self.assertFalse(backup.exists())
+
+    def test_legacy_status_and_logs_require_server_permissions(self):
+        user_id=self.app.state.db.create_user("restricted-viewer","Viewer-password-123","viewer")
+        session_id,_=self.app.state.db.create_session(user_id)
+        client=TestClient(self.app)
+        client.cookies.set("mcm_session",session_id)
+        try:
+            self.assertEqual(client.get("/api/status").status_code,403)
+            self.assertEqual(client.get("/api/logs").status_code,403)
+            with self.assertRaises(WebSocketDisconnect):
+                with client.websocket_connect("/ws/logs") as socket:
+                    socket.send_text("poll")
+                    socket.receive_text()
+        finally:
+            client.close()
+
+    def test_servers_websocket_revalidates_revoked_sessions(self):
+        with self.client.websocket_connect("/ws/servers",headers={"origin":"http://testserver"}) as socket:
+            first=socket.receive_json()
+            self.assertEqual(first["type"],"servers")
+            self.app.state.db.delete_session(self.session_id)
+            with self.assertRaises(WebSocketDisconnect):
+                socket.receive_json()
+
+    def test_deleted_legacy_profile_invalidates_api_and_log_websocket(self):
+        viewer_id=self.app.state.db.create_user("legacy-viewer","Viewer-password-123","viewer")
+        self.app.state.db.set_server_permissions(viewer_id,self.profile_id,{"console.view"})
+        viewer_session,_=self.app.state.db.create_session(viewer_id)
+        client=TestClient(self.app)
+        client.cookies.set("mcm_session",viewer_session)
+        database_path=str(Path(self.temp.name)/"panel.db")
+        try:
+            with client.websocket_connect("/ws/logs",headers={"origin":"http://testserver"}) as socket:
+                self.app.state.profiles.delete(self.profile_id)
+                socket.send_text("poll")
+                with self.assertRaises(WebSocketDisconnect):
+                    socket.receive_text()
+            self.assertEqual(client.get("/api/status").status_code,404)
+            self.assertEqual(client.get("/api/logs").status_code,404)
+            with self.app.state.db._connect() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM server_permissions WHERE server_id=?",(self.profile_id,)).fetchone()[0],0)
+        finally:
+            client.close()
+        restarted=create_app(FakeController(self.server_dir),database_path)
+        restarted_client=TestClient(restarted)
+        try:
+            self.assertEqual(restarted_client.get("/api/status").status_code,404)
+            self.assertEqual(restarted_client.get("/api/logs").status_code,404)
+            with self.assertRaises(WebSocketDisconnect):
+                with restarted_client.websocket_connect("/ws/logs",headers={"origin":"http://testserver"}):
+                    pass
+        finally:
+            restarted_client.close()
+            restarted.state.scheduler.stop_event.set()
+            restarted.state.monitor.stop()
+
+    def test_chunk_upload_http_rejects_oversized_stream(self):
+        url=f"/api/servers/{self.profile_id}/files/upload/chunk?upload_id={'a'*32}&path=plugins%2Ftest.jar&offset=0&final=true"
+        response=self.client.post(url,content=b"x"*(8*1024*1024+1),headers={"x-csrf-token":self.csrf,"content-type":"application/octet-stream"})
+        self.assertEqual(response.status_code,413,response.text)
+
+    def test_first_admin_setup_rejects_cross_site_request(self):
+        empty_dir=Path(self.temp.name)/"empty-server"
+        empty_app=create_app(FakeController(str(empty_dir)),str(Path(self.temp.name)/"empty-panel.db"))
+        remote=TestClient(empty_app,client=("203.0.113.7",51000))
+        local=TestClient(empty_app,client=("127.0.0.1",51001))
+        try:
+            denied_remote=remote.post("/setup",data={"username":"attacker","password":"Attacker-password-123"},headers={"origin":"http://testserver","sec-fetch-site":"same-origin"})
+            self.assertEqual(denied_remote.status_code,403)
+            denied_cross=local.post("/setup",data={"username":"attacker","password":"Attacker-password-123"},headers={"origin":"https://attacker.example","sec-fetch-site":"cross-site"})
+            self.assertEqual(denied_cross.status_code,403)
+            self.assertEqual(empty_app.state.db.user_count(),0)
+            allowed=local.post("/setup",data={"username":"first-admin","password":"Secure-password-123"},headers={"origin":"http://testserver","sec-fetch-site":"same-origin"},follow_redirects=False)
+            self.assertEqual(allowed.status_code,303,allowed.text)
+            self.assertEqual(empty_app.state.db.user_count(),1)
+            with self.assertRaisesRegex(ValueError,"已初始化"):
+                empty_app.state.db.create_first_admin("second-admin","Another-password-123")
+        finally:
+            remote.close()
+            local.close()
+            empty_app.state.scheduler.stop_event.set()
+            empty_app.state.monitor.stop()
+
     def test_alert_threshold_permissions_and_history(self):
         headers = {"x-csrf-token": self.csrf}
         result = self.client.put(f"/api/servers/{self.profile_id}/alerts", headers=headers, json={"cpu_percent": 80, "memory_percent": 85, "disk_used_percent": 95})
@@ -331,6 +433,57 @@ class MaintenanceApiTests(unittest.TestCase):
             self.app.state.db.set_user_enabled(current_id, False)
         with self.assertRaisesRegex(ValueError, "最後一位"):
             self.app.state.db.delete_user(current_id)
+
+    def test_role_change_and_disable_revoke_existing_sessions(self):
+        user_id=self.app.state.db.create_user("revoked-user","Revoked-password-123","operator")
+        session_id,_=self.app.state.db.create_session(user_id)
+        self.assertIsNotNone(self.app.state.db.get_session(session_id))
+        self.app.state.db.set_user_role(user_id,"viewer")
+        self.assertIsNone(self.app.state.db.get_session(session_id))
+        session_id,_=self.app.state.db.create_session(user_id)
+        self.app.state.db.set_user_enabled(user_id,False)
+        self.assertIsNone(self.app.state.db.get_session(session_id))
+
+    def test_java_download_rejects_untrusted_redirect_host(self):
+        from unittest.mock import Mock
+        response=Mock()
+        response.is_redirect=True
+        response.headers={"location":"https://127.0.0.1/private.zip"}
+        with patch("web_panel.java_runtime.requests.get",return_value=response) as get:
+            with self.assertRaisesRegex(RuntimeError,"不受信任"):
+                JavaRuntimeJobs._download_response("https://api.adoptium.net/v3/binary/latest/25/ga/windows/x64/jdk/hotspot/normal/eclipse")
+        self.assertEqual(get.call_count,1)
+        response.close.assert_called_once()
+
+    def test_login_rejects_cross_site_origin(self):
+        client=TestClient(self.app)
+        try:
+            response=client.post("/login",data={"username":"admin","password":"A-strong-password-123"},headers={"origin":"https://attacker.example","sec-fetch-site":"cross-site"},follow_redirects=False)
+            self.assertEqual(response.status_code,403)
+            self.assertNotIn("mcm_session",client.cookies)
+        finally:
+            client.close()
+
+    def test_login_rejects_cross_scheme_same_host_origin_and_missing_metadata(self):
+        for headers in (
+            {"origin":"http://testserver","sec-fetch-site":"same-site"},
+            {},
+        ):
+            client=TestClient(self.app,base_url="https://testserver")
+            try:
+                response=client.post("/login",data={"username":"admin","password":"A-strong-password-123"},headers=headers,follow_redirects=False)
+                self.assertEqual(response.status_code,403,response.text)
+                self.assertNotIn("mcm_session",client.cookies)
+            finally:
+                client.close()
+
+    def test_logout_requires_csrf_and_then_revokes_session(self):
+        denied=self.client.post("/logout",follow_redirects=False)
+        self.assertEqual(denied.status_code,403)
+        self.assertIsNotNone(self.app.state.db.get_session(self.session_id))
+        allowed=self.client.post("/logout",data={"csrf":self.csrf},follow_redirects=False)
+        self.assertEqual(allowed.status_code,303)
+        self.assertIsNone(self.app.state.db.get_session(self.session_id))
 
 
 if __name__ == "__main__":

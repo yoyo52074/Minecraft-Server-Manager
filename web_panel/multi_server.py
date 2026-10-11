@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from core_metadata import minimum_java_version
 
@@ -35,13 +35,31 @@ class CoreAdapter:
         return ["server.jar", "minecraft_server.jar"]
 
     def find_launcher(self, directory: Path, configured: str | None = None):
+        directory = Path(directory).resolve()
         candidates = [configured] if configured else []
         candidates.extend(self.candidate_launchers())
+
+        def safe_candidate(name):
+            raw = str(name or "")
+            if (not re.fullmatch(r"[A-Za-z0-9._+-]{1,180}", raw)
+                    or PurePosixPath(raw).name != raw or PureWindowsPath(raw).name != raw):
+                return None
+            candidate = directory / raw
+            if candidate.is_symlink():
+                return None
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(directory)
+            except (OSError, ValueError):
+                return None
+            return resolved if resolved.is_file() else None
+
         for name in candidates:
-            if name and (directory / name).is_file():
-                return directory / name
+            candidate = safe_candidate(name)
+            if candidate:
+                return candidate
         jars = sorted(directory.glob("*.jar"))
-        return jars[0] if jars else None
+        return safe_candidate(jars[0].name) if jars else None
 
     def command(self, profile: dict, java_path=None):
         directory = Path(profile["directory"])
@@ -49,7 +67,14 @@ class CoreAdapter:
         if not launcher:
             raise FileNotFoundError("找不到伺服器啟動檔，請先上傳或安裝核心")
         if launcher.suffix.lower() == ".bat":
-            return [str(launcher)], True
+            if os.name != "nt":
+                raise ValueError("Windows 批次啟動檔只能在 Windows 上執行")
+            # The basename is validated by find_launcher; pass only that safe token to cmd.
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", f'call "{launcher.name}"']
+        if launcher.suffix.lower() == ".sh":
+            if os.name == "nt":
+                raise ValueError("POSIX shell 啟動檔不能在 Windows 上執行")
+            return ["/bin/sh", launcher.name]
         java = java_path or profile.get("java_path") or "java"
         return [
             java,
@@ -58,7 +83,7 @@ class CoreAdapter:
             "-jar",
             launcher.name,
             "nogui",
-        ], False
+        ]
 
     @staticmethod
     def required_java_version(profile, launcher=None):
@@ -251,9 +276,26 @@ class ServerProfileStore:
         if not values:
             return current
         values["updated_at"] = self.db._now()
-        assignments = ", ".join(f"{key} = ?" for key in values)
+        fields = ("name", "directory", "core_type", "minecraft_version", "java_path", "min_memory",
+                  "max_memory", "server_port", "launcher", "auto_restart", "enabled")
+        parameters = []
+        for field in fields:
+            parameters.extend((int(field in values), values.get(field)))
+        parameters.extend((values["updated_at"], profile_id))
         with self.db._connect() as conn:
-            conn.execute(f"UPDATE server_profiles SET {assignments} WHERE id = ?", (*values.values(), profile_id))
+            conn.execute("""UPDATE server_profiles SET
+                name=CASE WHEN ? THEN ? ELSE name END,
+                directory=CASE WHEN ? THEN ? ELSE directory END,
+                core_type=CASE WHEN ? THEN ? ELSE core_type END,
+                minecraft_version=CASE WHEN ? THEN ? ELSE minecraft_version END,
+                java_path=CASE WHEN ? THEN ? ELSE java_path END,
+                min_memory=CASE WHEN ? THEN ? ELSE min_memory END,
+                max_memory=CASE WHEN ? THEN ? ELSE max_memory END,
+                server_port=CASE WHEN ? THEN ? ELSE server_port END,
+                launcher=CASE WHEN ? THEN ? ELSE launcher END,
+                auto_restart=CASE WHEN ? THEN ? ELSE auto_restart END,
+                enabled=CASE WHEN ? THEN ? ELSE enabled END,
+                updated_at=? WHERE id=?""", parameters)
         return self.get(profile_id)
 
     def delete(self, profile_id: int, delete_files=False):
@@ -264,6 +306,7 @@ class ServerProfileStore:
             shutil.rmtree(profile["directory"], ignore_errors=False)
         self.db.suppress_legacy_server(profile["directory"], True)
         with self.db._connect() as conn:
+            conn.execute("DELETE FROM server_permissions WHERE server_id = ?", (profile_id,))
             conn.execute("DELETE FROM server_profiles WHERE id = ?", (profile_id,))
 
 
@@ -404,7 +447,7 @@ class MultiServerManager:
                 java_path, java_major = adapter.resolve_java(profile, required_java, minecraft_version)
             except ValueError as exc:
                 return False, str(exc)
-            command, shell = adapter.command(profile, java_path)
+            command = adapter.command(profile, java_path)
             java_bin = Path(java_path).resolve().parent
             process_env = os.environ.copy()
             if java_bin.is_dir():
@@ -419,7 +462,6 @@ class MultiServerManager:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                shell=shell,
                 env=process_env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )

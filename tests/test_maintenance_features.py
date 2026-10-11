@@ -3,12 +3,12 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, Mock, patch
 import zipfile
 
 from backup_manager import BackupCancelledError, BackupManager
 from web_panel.database import WebDatabase
-from web_panel.operations import MonitorService
+from web_panel.operations import MonitorService, Scheduler, _post_webhook
 from web_panel.multi_server import MultiServerManager
 
 
@@ -58,6 +58,102 @@ class BackupMaintenanceTests(unittest.TestCase):
             archive.writestr("..\\..\\outside.txt", "bad")
         with self.assertRaises(ValueError):
             self.manager.restore_backup(bad)
+
+    def test_backup_skips_top_level_symlink_to_external_data(self):
+        external = tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        with open(os.path.join(external.name, "secret.txt"), "w", encoding="utf-8") as file:
+            file.write("outside server root")
+        link = os.path.join(self.root, "plugins")
+        try:
+            os.symlink(external.name, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("目前平台不允許建立符號連結")
+        archive = self.manager.create_backup("symlink-check")
+        with zipfile.ZipFile(archive) as backup:
+            self.assertNotIn("plugins/secret.txt", backup.namelist())
+
+    def test_restore_rejects_existing_symlink_parent(self):
+        external = tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        outside_file = os.path.join(external.name, "owned.txt")
+        with open(outside_file, "w", encoding="utf-8") as file:
+            file.write("safe")
+        link = os.path.join(self.root, "world")
+        import shutil
+        shutil.rmtree(link)
+        try:
+            os.symlink(external.name, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("目前平台不允許建立符號連結")
+        archive = os.path.join(self.manager.backup_directory, "symlink-restore.zip")
+        with zipfile.ZipFile(archive, "w") as backup:
+            backup.writestr("world/owned.txt", "overwritten")
+        with self.assertRaisesRegex(ValueError, "不安全的路徑|符號連結"):
+            self.manager.restore_backup(archive)
+        with open(outside_file, encoding="utf-8") as file:
+            self.assertEqual(file.read(), "safe")
+
+    def test_restore_rejects_windows_casefold_duplicate_members(self):
+        archive=os.path.join(self.manager.backup_directory,"case-duplicate.zip")
+        with zipfile.ZipFile(archive,"w") as backup:
+            backup.writestr("world/case.txt","first")
+            backup.writestr("world/CASE.TXT","second")
+        with self.assertRaisesRegex(ValueError,"大小寫|正規化後重複"):
+            self.manager.restore_backup(archive,create_safety_backup=False)
+        with open(os.path.join(self.root,"world","level.dat"),"rb") as file:
+            self.assertEqual(file.read(),b"world-state")
+
+    def test_restore_commit_failure_rolls_back_replaced_files(self):
+        world=os.path.join(self.root,"world")
+        first=os.path.join(world,"a.txt")
+        second=os.path.join(world,"b.txt")
+        with open(first,"w",encoding="utf-8") as file:file.write("old-a")
+        with open(second,"w",encoding="utf-8") as file:file.write("old-b")
+        archive=os.path.join(self.manager.backup_directory,"rollback.zip")
+        with zipfile.ZipFile(archive,"w") as backup:
+            backup.writestr("world/a.txt","new-a")
+            backup.writestr("world/b.txt","new-b")
+        original_replace=os.replace
+        def fail_second_staged_replace(source,destination):
+            if str(source).replace("\\","/").endswith("/staging/world/b.txt"):
+                raise OSError("simulated disk failure")
+            return original_replace(source,destination)
+        with patch("backup_manager.os.replace",side_effect=fail_second_staged_replace):
+            with self.assertRaisesRegex(OSError,"simulated disk failure"):
+                self.manager.restore_backup(archive,create_safety_backup=False)
+        with open(first,encoding="utf-8") as file:self.assertEqual(file.read(),"old-a")
+        with open(second,encoding="utf-8") as file:self.assertEqual(file.read(),"old-b")
+
+    def test_settings_backup_rejects_symlinked_properties_and_settings_directory(self):
+        external=tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        outside_properties=os.path.join(external.name,"outside.properties")
+        with open(outside_properties,"w",encoding="utf-8") as file:file.write("motd=private\n")
+        properties=os.path.join(self.root,"server.properties")
+        os.unlink(properties)
+        try:
+            os.symlink(outside_properties,properties)
+        except (OSError,NotImplementedError):
+            self.skipTest("目前平台不允許建立符號連結")
+        with self.assertRaisesRegex(ValueError,"符號連結"):
+            self.manager.create_settings_backup({"name":"test"})
+        os.unlink(properties)
+        settings=os.path.join(self.manager.backup_directory,"settings")
+        if os.path.isdir(settings) and not os.listdir(settings):
+            os.rmdir(settings)
+        outside_zip=os.path.join(external.name,"settings-outside.zip")
+        with open(outside_zip,"wb") as file:file.write(b"keep")
+        try:
+            os.symlink(external.name,settings,target_is_directory=True)
+        except (OSError,NotImplementedError):
+            self.skipTest("目前平台不允許建立符號連結")
+        with self.assertRaisesRegex(ValueError,"符號連結"):
+            self.manager.create_settings_backup({"name":"test"})
+        with self.assertRaisesRegex(ValueError,"符號連結"):
+            self.manager.cleanup_settings_retention(retain=1)
+        with open(outside_zip,"rb") as file:
+            self.assertEqual(file.read(),b"keep")
 
 
 class HistoryAndAlertTests(unittest.TestCase):
@@ -148,6 +244,26 @@ class HistoryAndAlertTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["alert_key"], "memory")
         self.assertIn("配置上限", events[0]["message"])
+
+    def test_webhook_sender_rejects_redirects_and_nonstandard_ports(self):
+        response=MagicMock()
+        response.is_redirect=True
+        response.__enter__.return_value=response
+        response.__exit__.return_value=False
+        with patch("web_panel.operations.requests.post",return_value=response) as post:
+            self.assertFalse(_post_webhook("https://discord.com/api/webhooks/123/token",{"content":"test"}))
+            self.assertFalse(post.call_args.kwargs["allow_redirects"])
+            self.assertFalse(_post_webhook("https://discord.com:8443/api/webhooks/123/token",{"content":"test"}))
+            self.assertEqual(post.call_count,1)
+
+    def test_schedule_webhook_validation_matches_sender_allowlist(self):
+        self.assertEqual(Scheduler._validated_webhook("https://discord.com/api/webhooks/123/token"),"https://discord.com/api/webhooks/123/token")
+        for url in ("https://user:pass@discord.com/api/webhooks/123/token",
+                    "https://discord.com:8443/api/webhooks/123/token",
+                    "https://discord.com.evil.test/api/webhooks/123/token",
+                    "https://hooks.slack.com:bad/services/token"):
+            with self.assertRaisesRegex(ValueError,"Discord 或 Slack"):
+                Scheduler._validated_webhook(url)
 
 
 if __name__ == "__main__":

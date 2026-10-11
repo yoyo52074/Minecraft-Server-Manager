@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -9,12 +10,21 @@ import uuid
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 
 class JavaRuntimeJobs:
-    """Find a suitable installed Java runtime or install Temurin for a server."""
+    """Find an installed Java runtime or install Temurin for a server."""
+
+    DOWNLOAD_HOSTS = {
+        "api.adoptium.net", "github.com", "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com", "github-releases.githubusercontent.com",
+    }
+    MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
+    MAX_EXTRACT_BYTES = 4 * 1024 * 1024 * 1024
+    MAX_ARCHIVE_ENTRIES = 200000
 
     def __init__(self, profiles, database, runtime_root, start_server=None):
         self.profiles = profiles
@@ -195,6 +205,27 @@ class JavaRuntimeJobs:
         self._update(job_id, status="completed", stage="complete", java_path=str(path),
                      java_version=major, start_result=start_result, message=message, finished_at=time.time())
 
+    @classmethod
+    def _download_response(cls, url):
+        current = url
+        for _ in range(6):
+            parsed = urlparse(current)
+            if (parsed.scheme != "https" or not parsed.hostname
+                    or parsed.hostname.casefold() not in cls.DOWNLOAD_HOSTS
+                    or parsed.username or parsed.password):
+                raise RuntimeError("Java 下載重新導向至不受信任的 HTTPS 主機，已停止下載。")
+            response = requests.get(current, stream=True, allow_redirects=False, timeout=(20, 90))
+            if response.is_redirect:
+                location = response.headers.get("location")
+                response.close()
+                if not location:
+                    raise RuntimeError("Java 下載回應缺少重新導向位置。")
+                current = urljoin(current, location)
+                continue
+            response.raise_for_status()
+            return response
+        raise RuntimeError("Java 下載重新導向次數過多。")
+
     def _run(self, job_id, profile, actor_id, start_after):
         required = self._jobs[job_id]["required_version"]
         self._update(job_id, status="running")
@@ -228,12 +259,13 @@ class JavaRuntimeJobs:
         extract_dir = work / "extract"
         staged_dir = work / "runtime"
         try:
-            with requests.get(url, stream=True, allow_redirects=True, timeout=(20, 90)) as response:
-                response.raise_for_status()
+            with self._download_response(url) as response:
                 try:
                     total_bytes = max(0, int(response.headers.get("content-length", 0)))
                 except (TypeError, ValueError):
                     total_bytes = 0
+                if total_bytes > self.MAX_ARCHIVE_BYTES:
+                    raise RuntimeError("Java 安裝檔超過 1 GiB，已停止下載。")
                 if job_id:
                     self._update(job_id, stage="download", progress=0, downloaded_bytes=0,
                                  total_bytes=total_bytes, message=f"正在下載 Temurin Java {major}…")
@@ -241,6 +273,8 @@ class JavaRuntimeJobs:
                 with archive_path.open("wb") as output:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if chunk:
+                            if downloaded_bytes + len(chunk) > self.MAX_ARCHIVE_BYTES:
+                                raise RuntimeError("Java 安裝檔超過 1 GiB，已停止下載。")
                             output.write(chunk)
                             downloaded_bytes += len(chunk)
                             if job_id:
@@ -254,14 +288,21 @@ class JavaRuntimeJobs:
                              message="下載完成，正在驗證 Java 安裝檔…")
             with zipfile.ZipFile(archive_path) as archive:
                 members = archive.infolist()
+                if len(members) > self.MAX_ARCHIVE_ENTRIES:
+                    raise RuntimeError("Java 安裝檔項目過多，已停止解壓。")
+                extract_total = sum(item.file_size for item in members if not item.is_dir())
+                if extract_total > self.MAX_EXTRACT_BYTES:
+                    raise RuntimeError("Java 安裝檔展開後超過 4 GiB，已停止解壓。")
                 for member in members:
                     member_path = PurePosixPath(member.filename.replace("\\", "/"))
-                    if member_path.is_absolute() or re.match(r"^[A-Za-z]:", member.filename) or ".." in member_path.parts:
+                    mode = member.external_attr >> 16
+                    if (member_path.is_absolute() or re.match(r"^[A-Za-z]:", member.filename)
+                            or ".." in member_path.parts or stat.S_ISLNK(mode)
+                            or (mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)))):
                         raise RuntimeError("Java 安裝壓縮檔含有不安全路徑，已停止解壓。")
                 damaged_member = archive.testzip()
                 if damaged_member:
                     raise RuntimeError(f"Java 安裝檔 CRC 驗證失敗：{damaged_member}")
-                extract_total = sum(item.file_size for item in members if not item.is_dir())
                 extract_bytes = 0
                 if job_id:
                     self._update(job_id, stage="install", progress=0,
@@ -278,6 +319,8 @@ class JavaRuntimeJobs:
                             chunk = source.read(1024 * 1024)
                             if not chunk:
                                 break
+                            if extract_bytes + len(chunk) > self.MAX_EXTRACT_BYTES:
+                                raise RuntimeError("Java 安裝檔展開後超過 4 GiB，已停止解壓。")
                             output.write(chunk)
                             extract_bytes += len(chunk)
                             if job_id:

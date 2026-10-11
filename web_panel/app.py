@@ -1,11 +1,13 @@
 import asyncio
 import csv
+import ipaddress
 import io
 import json
 import re
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -14,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from backup_manager import BackupJobManager, BackupManager
 from server_manager import ServerManager
 from .database import WebDatabase
-from .file_service import SafeFileService
+from .file_service import MAX_UPLOAD_CHUNK_BYTES, SafeFileService
 from .core_update import CoreUpdateJobs
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
@@ -84,6 +86,47 @@ def create_app(controller, database_path):
         if not token or token != user["csrf_token"]:
             raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
 
+    def same_origin(headers, expected_scheme=None, expected_host=None):
+        site = headers.get("sec-fetch-site", "").lower()
+        if site == "cross-site":
+            return False
+        origin = headers.get("origin")
+        if not origin:
+            return site in {"same-origin", "none"}
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        host = (expected_host or headers.get("host", "")).rstrip(".").casefold()
+        origin_host = parsed.netloc.rstrip(".").casefold()
+        if parsed.scheme not in {"http", "https"} or not origin_host:
+            return False
+        scheme = expected_scheme or ("https" if headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower() == "https" else "http")
+        if parsed.scheme != scheme:
+            return False
+        # Fetch Metadata may accommodate a proxy-rewritten host, but never a scheme mismatch.
+        return origin_host == host or site == "same-origin"
+
+    def require_same_origin(request: Request):
+        if not same_origin(request.headers, request.url.scheme, request.url.netloc):
+            raise HTTPException(status_code=403, detail="跨來源請求已拒絕")
+
+    def current_legacy_profile():
+        if not legacy_profile:
+            return None
+        profile = profiles.get(legacy_profile["id"])
+        if not profile:
+            return None
+        if Path(profile["directory"]).resolve() != Path(controller.server_directory).resolve():
+            return None
+        return profile
+
+    def set_auth_cookies(response, request: Request, session_id: str, csrf_token: str):
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        secure = request.url.scheme == "https" or forwarded_proto == "https"
+        response.set_cookie("mcm_session", session_id, httponly=True, samesite="lax", max_age=86400, secure=secure, path="/")
+        response.set_cookie("mcm_csrf", csrf_token, httponly=False, samesite="lax", max_age=86400, secure=secure, path="/")
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         user = current_user(request)
@@ -127,33 +170,46 @@ def create_app(controller, database_path):
 
     @app.post("/setup")
     def setup(request: Request, username: str = Form(...), password: str = Form(...)):
-        if db.user_count() > 0:
-            raise HTTPException(status_code=403, detail="管理員已初始化")
+        peer = request.client.host if request.client else ""
         try:
-            user_id = db.create_user(username, password, "admin")
+            peer_ip = ipaddress.ip_address(peer)
+            local_peer = peer_ip.is_loopback
+            if isinstance(peer_ip, ipaddress.IPv6Address) and peer_ip.ipv4_mapped:
+                local_peer = local_peer or peer_ip.ipv4_mapped.is_loopback
+        except ValueError:
+            local_peer = False
+        if not local_peer:
+            raise HTTPException(status_code=403, detail="首次初始化僅允許本機連線，請在執行伺服器的電腦上開啟管理面板")
+        require_same_origin(request)
+        try:
+            user_id = db.create_first_admin(username, password)
         except ValueError as exc:
+            if db.user_count() > 0:
+                raise HTTPException(status_code=403, detail="管理員已初始化") from exc
             return render(request, "login.html", error=str(exc))
         db.audit(user_id, "setup_admin", "建立第一位管理員")
         session_id, csrf = db.create_session(user_id)
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("mcm_session", session_id, httponly=True, samesite="lax", max_age=86400)
-        response.set_cookie("mcm_csrf", csrf, httponly=False, samesite="lax", max_age=86400)
+        set_auth_cookies(response, request, session_id, csrf)
         return response
 
     @app.post("/login")
     def login(request: Request, username: str = Form(...), password: str = Form(...)):
+        require_same_origin(request)
         user = db.authenticate(username, password)
         if not user:
             return render(request, "login.html", error="帳號或密碼錯誤")
         session_id, csrf = db.create_session(user["id"])
         db.audit(user["id"], "login")
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie("mcm_session", session_id, httponly=True, samesite="lax", max_age=86400)
-        response.set_cookie("mcm_csrf", csrf, httponly=False, samesite="lax", max_age=86400)
+        set_auth_cookies(response, request, session_id, csrf)
         return response
 
     @app.post("/logout")
-    def logout(request: Request):
+    def logout(request: Request, csrf: str = Form("")):
+        user = current_user(request)
+        if user and csrf != user["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
         session_id = request.cookies.get("mcm_session")
         if session_id:
             db.delete_session(session_id)
@@ -164,12 +220,18 @@ def create_app(controller, database_path):
 
     @app.get("/api/status")
     def api_status(request: Request):
-        require_user(request)
+        profile = current_legacy_profile()
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到既有伺服器")
+        require_server_permission(request, profile["id"], "server.view")
         return app.state.bridge.status()
 
     @app.get("/api/logs")
     def api_logs(request: Request, limit: int = 100):
-        require_user(request)
+        profile = current_legacy_profile()
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到既有伺服器")
+        require_server_permission(request, profile["id"], "console.view")
         return {"logs": app.state.bridge.logs(limit)}
 
     @app.get("/api/servers")
@@ -301,7 +363,8 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/alerts/evaluate")
     def evaluate_alerts(profile_id: int, request: Request):
-        require_server_permission(request, profile_id, "resources.view")
+        user = require_server_permission(request, profile_id, "resources.view")
+        check_csrf(request, user)
         status = multi.status(profile_id)
         if status:
             db.evaluate_metric_alerts(profile_id, status["metrics"])
@@ -323,7 +386,11 @@ def create_app(controller, database_path):
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
-        return {"profile": profile, "properties": ServerManager(profile["directory"]).get_server_properties()}
+        try:
+            properties = ServerManager(profile["directory"]).get_server_properties()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"profile": profile, "properties": properties}
 
     @app.put("/api/servers/{profile_id}/settings")
     async def update_server_settings(profile_id: int, request: Request):
@@ -352,13 +419,18 @@ def create_app(controller, database_path):
                     raise ValueError
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="伺服器連接埠必須介於 1 到 65535") from exc
-        before_properties = ServerManager(profile["directory"]).get_server_properties()
+        try:
+            before_properties = ServerManager(profile["directory"]).get_server_properties()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         before_profile = {key: profile.get(key) for key in profile_values}
         backup_manager = BackupManager(profile["directory"])
         try:
             snapshot = backup_manager.create_settings_backup(profile)
             retention = db.backup_retention(profile_id)
             backup_manager.cleanup_settings_retention(retention["settings_retain_count"], retention["settings_max_age_days"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"設定安全快照遭安全檢查拒絕，未儲存設定：{exc}") from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"設定安全快照建立失敗，未儲存設定：{exc}") from exc
         # Save only after the rollback snapshot exists.
@@ -366,7 +438,7 @@ def create_app(controller, database_path):
             ServerManager(profile["directory"]).save_server_properties({str(k): str(v) for k, v in properties.items()})
             if profile_values:
                 profiles.update(profile_id, profile_values)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         changes = {"properties": {key: {"from": before_properties.get(key), "to": str(value)} for key, value in properties.items() if before_properties.get(key) != str(value)},
                    "profile": {key: {"from": before_profile.get(key), "to": value} for key, value in profile_values.items() if before_profile.get(key) != value},
@@ -610,9 +682,9 @@ def create_app(controller, database_path):
 
     @app.delete("/api/servers/{profile_id}/backups/{name}")
     def delete_backup(profile_id:int,name:str,request:Request):
-        user=require_server_permission(request,profile_id,"backups.delete");profile=profiles.get(profile_id);root=(Path(profile["directory"])/"backups").resolve();target=(root/name).resolve()
+        user=require_server_permission(request,profile_id,"backups.delete");check_csrf(request,user);profile=profiles.get(profile_id);root=(Path(profile["directory"])/"backups").resolve();target=(root/name).resolve()
         if target.parent!=root or target.suffix.lower()!='.zip': raise HTTPException(status_code=400,detail="無效的備份")
-        target.unlink(missing_ok=False);db.audit(user["user_id"],"delete_backup",f"{profile_id}:{name}");return {"ok":True}
+        target.unlink(missing_ok=False);db.audit(user["user_id"],"delete_backup",f"{profile_id}:{name}",server_id=profile_id);return {"ok":True}
 
     @app.post("/api/servers/{profile_id}/backups")
     async def create_backup(profile_id: int, request: Request):
@@ -730,7 +802,15 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "files.upload")
         check_csrf(request, user)
         try:
-            result = files.upload_chunk(profile_id, upload_id, path, offset, await request.body(), final, conflict)
+            content_length = request.headers.get("content-length")
+            if content_length and int(content_length) > MAX_UPLOAD_CHUNK_BYTES:
+                raise HTTPException(status_code=413, detail="單次上傳分段不可超過 8 MiB")
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > MAX_UPLOAD_CHUNK_BYTES:
+                    raise HTTPException(status_code=413, detail="單次上傳分段不可超過 8 MiB")
+                body.extend(chunk)
+            result = files.upload_chunk(profile_id, upload_id, path, offset, body, final, conflict)
         except (PermissionError, ValueError, OSError, FileExistsError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if result.get("complete"):
@@ -1001,15 +1081,28 @@ def create_app(controller, database_path):
 
     @app.websocket("/ws/logs")
     async def logs_socket(websocket: WebSocket):
+        expected_scheme = "https" if websocket.url.scheme == "wss" else "http"
+        if not same_origin(websocket.headers, expected_scheme, websocket.url.netloc):
+            await websocket.close(code=1008)
+            return
+        profile = current_legacy_profile()
         session = db.get_session(websocket.cookies.get("mcm_session"))
-        if not session:
+        if not profile or not session or not db.has_server_permission(session, profile["id"], "console.view"):
             await websocket.close(code=1008)
             return
         await websocket.accept()
         try:
             last = len(app.state.bridge.logs())
             while True:
-                await websocket.receive_text()
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                session = db.get_session(session["id"])
+                profile = current_legacy_profile()
+                if not profile or not session or not db.has_server_permission(session, profile["id"], "console.view"):
+                    await websocket.close(code=1008)
+                    return
                 logs = app.state.bridge.logs()
                 if len(logs) > last:
                     for line in logs[last:]:
@@ -1020,6 +1113,10 @@ def create_app(controller, database_path):
 
     @app.websocket("/ws/servers")
     async def servers_socket(websocket: WebSocket):
+        expected_scheme = "https" if websocket.url.scheme == "wss" else "http"
+        if not same_origin(websocket.headers, expected_scheme, websocket.url.netloc):
+            await websocket.close(code=1008)
+            return
         session = db.get_session(websocket.cookies.get("mcm_session"))
         if not session:
             await websocket.close(code=1008)
@@ -1027,6 +1124,10 @@ def create_app(controller, database_path):
         await websocket.accept()
         try:
             while True:
+                session = db.get_session(session["id"])
+                if not session:
+                    await websocket.close(code=1008)
+                    return
                 snapshot = visible_servers(session)
                 await websocket.send_json({"type": "servers", "servers": snapshot, "timestamp": asyncio.get_running_loop().time()})
                 try:

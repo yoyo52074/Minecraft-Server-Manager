@@ -208,6 +208,25 @@ class WebDatabase:
             )
             return cursor.lastrowid
 
+    def create_first_admin(self, username: str, password: str):
+        """Atomically create the sole first administrator during first-run setup."""
+        username = username.strip()
+        if not username or len(username) > 64:
+            raise ValueError("帳號長度必須為 1 到 64 個字元")
+        if len(password) < 12:
+            raise ValueError("密碼至少需要 12 個字元")
+        password_hash = self.password_hasher.hash(password)
+        now = self._now()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+                raise ValueError("管理員已初始化")
+            cursor = db.execute(
+                "INSERT INTO users(username, password_hash, role, created_at, updated_at) VALUES (?, ?, 'admin', ?, ?)",
+                (username, password_hash, now, now),
+            )
+            return cursor.lastrowid
+
     def authenticate(self, username: str, password: str):
         with self._connect() as db:
             row = db.execute("SELECT * FROM users WHERE username = ?", (username.strip(),)).fetchone()
@@ -269,6 +288,8 @@ class WebDatabase:
                 if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
                     raise ValueError("不能停用最後一位啟用中的管理員")
             db.execute("UPDATE users SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), self._now(), user_id))
+            if not enabled:
+                db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
 
     def set_user_role(self, user_id: int, role: str):
         if role not in {"admin", "operator", "viewer"}:
@@ -279,8 +300,10 @@ class WebDatabase:
                 if db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1").fetchone()[0] <= 1:
                     raise ValueError("不能變更最後一位啟用中管理員的角色")
             db.execute("UPDATE users SET role = ?, updated_at = ? WHERE id = ?", (role, self._now(), user_id))
+            if current and current["role"] != role:
+                db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
 
-    def update_user(self, user_id: int, username: str, password: str = "", role: str | None = None):
+    def update_user(self, user_id: int, username: str, password: str | None = None, role: str | None = None):
         username = username.strip()
         if not username or len(username) > 64:
             raise ValueError("帳號長度必須為 1 到 64 個字元")
@@ -302,6 +325,8 @@ class WebDatabase:
                 db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
             else:
                 db.execute("UPDATE users SET username=?,role=COALESCE(?,role),updated_at=? WHERE id=?", (username, role, now, user_id))
+                if role is not None and role != current["role"]:
+                    db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
         return username
 
     def delete_user(self, user_id: int):
@@ -469,7 +494,11 @@ class WebDatabase:
         with self._connect() as db:
             names=('server_id','recorded_at','cpu_percent','memory_mb','memory_percent','memory_limit_percent','memory_limit_mb','disk_used_percent','disk_free_gb','disk_used_gb','disk_total_gb','net_sent_mb','net_recv_mb','tps','mspt','online_players','max_players','heap_used_mb','heap_max_mb','heap_percent','gc_count','gc_time_ms','disk_read_mb_s','disk_write_mb_s')
             values=[server_id,__import__('time').time()]+[metrics.get(name,-1 if name=='online_players' else 0) for name in names[2:]]
-            db.execute(f"INSERT INTO resource_metrics({','.join(names)}) VALUES({','.join('?' for _ in names)})",values)
+            db.execute("""INSERT INTO resource_metrics(
+                server_id,recorded_at,cpu_percent,memory_mb,memory_percent,memory_limit_percent,memory_limit_mb,
+                disk_used_percent,disk_free_gb,disk_used_gb,disk_total_gb,net_sent_mb,net_recv_mb,tps,mspt,
+                online_players,max_players,heap_used_mb,heap_max_mb,heap_percent,gc_count,gc_time_ms,disk_read_mb_s,disk_write_mb_s
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",values)
             db.execute("DELETE FROM resource_metrics WHERE recorded_at < ?", (__import__('time').time()-86400,))
 
     def alert_notification_settings(self, server_id, reveal=False):
@@ -486,7 +515,9 @@ class WebDatabase:
         for value in (mute_start,mute_end):
             if value and not __import__('re').fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',str(value)):raise ValueError('靜音時段請使用 HH:MM 格式')
         parsed=__import__('urllib.parse',fromlist=['urlparse']).urlparse(webhook)
-        if webhook and not (parsed.scheme=='https' and ((parsed.hostname=='discord.com' and parsed.path.startswith('/api/webhooks/')) or (parsed.hostname=='hooks.slack.com' and parsed.path.startswith('/services/')))):
+        try:port=parsed.port
+        except ValueError:raise ValueError('通知只接受 Discord 或 Slack 的 HTTPS Webhook URL')
+        if webhook and not (parsed.scheme=='https' and parsed.username is None and parsed.password is None and port in (None,443) and ((parsed.hostname=='discord.com' and parsed.path.startswith('/api/webhooks/')) or (parsed.hostname=='hooks.slack.com' and parsed.path.startswith('/services/')))):
             raise ValueError('通知只接受 Discord 或 Slack 的 HTTPS Webhook URL')
         with self._connect() as db:
             db.execute('INSERT INTO alert_notification_settings(server_id,webhook_url,cooldown_seconds,mute_start,mute_end,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET webhook_url=excluded.webhook_url,cooldown_seconds=excluded.cooldown_seconds,mute_start=excluded.mute_start,mute_end=excluded.mute_end,updated_at=excluded.updated_at',(server_id,webhook,cooldown_seconds,mute_start,mute_end,self._now()))
@@ -561,12 +592,15 @@ class WebDatabase:
     def player_history(self, server_id, query='', limit=100, offset=0):
         query = str(query).strip().casefold()
         limit = min(max(int(limit),1),500); offset = max(int(offset),0)
-        where = 'server_id=?'; args = [server_id]
         if query:
-            where += ' AND (LOWER(name) LIKE ? OR LOWER(uuid) LIKE ?)'; args.extend([f'%{query}%',f'%{query}%'])
-        with self._connect() as db:
-            total = db.execute(f'SELECT COUNT(*) FROM player_records WHERE {where}',args).fetchone()[0]
-            players = [dict(row) for row in db.execute(f'SELECT * FROM player_records WHERE {where} ORDER BY last_seen DESC LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()]
+            pattern=f'%{query}%'
+            with self._connect() as db:
+                total=db.execute('SELECT COUNT(*) FROM player_records WHERE server_id=? AND (LOWER(name) LIKE ? OR LOWER(uuid) LIKE ?)',(server_id,pattern,pattern)).fetchone()[0]
+                players=[dict(row) for row in db.execute('SELECT * FROM player_records WHERE server_id=? AND (LOWER(name) LIKE ? OR LOWER(uuid) LIKE ?) ORDER BY last_seen DESC LIMIT ? OFFSET ?',(server_id,pattern,pattern,limit,offset)).fetchall()]
+        else:
+            with self._connect() as db:
+                total=db.execute('SELECT COUNT(*) FROM player_records WHERE server_id=?',(server_id,)).fetchone()[0]
+                players=[dict(row) for row in db.execute('SELECT * FROM player_records WHERE server_id=? ORDER BY last_seen DESC LIMIT ? OFFSET ?',(server_id,limit,offset)).fetchall()]
         return {'players':players,'total':total,'limit':limit,'offset':offset}
 
     def player_sessions(self, server_id, player_key=None, limit=500):

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -90,6 +91,50 @@ class WebPanelServiceTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             service.resolve(profile["id"], "../../outside.txt")
 
+    def test_file_service_blocks_windows_case_aliases_of_internal_directories(self):
+        profile=self.store.create("Internal aliases",Path(self.temp.name)/"internal-aliases","Paper")
+        service=SafeFileService(self.store)
+        for path in (".MCM_VERSIONS./abc/version.bin","plugins/.MCM_UPLOADS. /abc.part"):
+            with self.assertRaises(PermissionError):
+                service.resolve(profile["id"],path)
+
+    def test_launcher_must_be_a_regular_file_inside_server_root(self):
+        directory = Path(self.temp.name) / "safe-server"
+        directory.mkdir()
+        profile = self.store.create("Safe", directory, "Forge", launcher="../outside.bat")
+        outside = Path(self.temp.name) / "outside.bat"
+        outside.write_text("echo unsafe", encoding="utf-8")
+        adapter = CoreAdapter("Forge")
+        self.assertIsNone(adapter.find_launcher(directory, profile["launcher"]))
+        (directory / "safe.jar").write_bytes(b"jar")
+        self.assertEqual(adapter.find_launcher(directory, "../outside.bat"), (directory / "safe.jar").resolve())
+
+    def test_forge_posix_launcher_runs_as_shell_script_not_jar(self):
+        directory=Path(self.temp.name)/"forge-shell"
+        directory.mkdir()
+        (directory/"run.sh").write_text("#!/bin/sh\nexec java -jar forge.jar nogui\n",encoding="utf-8")
+        profile=self.store.create("Forge shell",directory,"Forge",launcher="run.sh")
+        adapter=CoreAdapter("Forge")
+        if os.name=="nt":
+            with self.assertRaisesRegex(ValueError,"POSIX shell"):
+                adapter.command(profile)
+        else:
+            self.assertEqual(adapter.command(profile),["/bin/sh","run.sh"])
+
+    def test_file_rename_cannot_bypass_blocked_executable_suffixes(self):
+        profile = self.store.create("Rename", Path(self.temp.name) / "rename", "Paper")
+        service = SafeFileService(self.store)
+        (Path(profile["directory"]) / "payload.txt").write_text("not executable", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "系統執行檔"):
+            service.rename(profile["id"], "payload.txt", "run.bat")
+
+    def test_chunk_upload_rejects_oversized_single_chunk(self):
+        profile = self.store.create("ChunkLimit", Path(self.temp.name) / "chunk-limit", "Paper")
+        service = SafeFileService(self.store)
+        with self.assertRaisesRegex(ValueError, "8 MiB"):
+            service.upload_chunk(profile["id"], uuid.uuid4().hex, "plugins/test.jar", 0,
+                                 b"x" * (8 * 1024 * 1024 + 1), False, "error")
+
     def test_file_search_batch_and_conflict_policies(self):
         profile = self.store.create("Files", Path(self.temp.name) / "files", "Paper")
         service = SafeFileService(self.store)
@@ -140,6 +185,26 @@ class WebPanelServiceTests(unittest.TestCase):
         service.cancel_upload(profile["id"], upload_id)
         self.assertFalse(service.upload_status(profile["id"], upload_id)["exists"])
 
+    def test_chunk_upload_failed_final_cleans_staging_and_stale_chunks_expire(self):
+        profile=self.store.create("Upload cleanup",Path(self.temp.name)/"upload-cleanup","Paper")
+        service=SafeFileService(self.store)
+        root=Path(profile["directory"])
+        (root/"exists.txt").write_text("old",encoding="utf-8")
+        upload_id=uuid.uuid4().hex
+        service.upload_chunk(profile["id"],upload_id,"exists.txt",0,b"new",False,"error")
+        with self.assertRaisesRegex(ValueError,"衝突策略"):
+            service.upload_chunk(profile["id"],upload_id,"exists.txt",3,b"!",True,"typo")
+        staging=root/".mcm_uploads"
+        self.assertFalse((staging/f"{upload_id}.part").exists())
+        self.assertFalse((staging/f"{upload_id}.json").exists())
+        stale_id=uuid.uuid4().hex
+        service.upload_chunk(profile["id"],stale_id,"new.txt",0,b"partial",False,"error")
+        old=time.time()-25*60*60
+        os.utime(staging/f"{stale_id}.part",(old,old))
+        os.utime(staging/f"{stale_id}.json",(old,old))
+        self.assertFalse(service.upload_status(profile["id"],stale_id)["exists"])
+        self.assertFalse((staging/f"{stale_id}.part").exists())
+
     def test_zip_extraction_rejects_traversal(self):
         profile = self.store.create("Zip", Path(self.temp.name) / "zip", "Paper")
         service = SafeFileService(self.store)
@@ -149,6 +214,33 @@ class WebPanelServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不安全"):
             service.unzip(profile["id"], "bad.zip", "extract")
         self.assertFalse((Path(self.temp.name) / "outside.txt").exists())
+
+    def test_zip_extraction_rejects_invalid_conflict_without_overwrite(self):
+        profile=self.store.create("ZIP conflict",Path(self.temp.name)/"zip-conflict","Paper")
+        service=SafeFileService(self.store)
+        root=Path(profile["directory"]);(root/"out").mkdir();(root/"out"/"old.txt").write_text("old",encoding="utf-8")
+        with zipfile.ZipFile(root/"source.zip","w") as archive:archive.writestr("old.txt","new")
+        with self.assertRaisesRegex(ValueError,"衝突策略"):
+            service.unzip(profile["id"],"source.zip","out",conflict="typo")
+        self.assertEqual((root/"out"/"old.txt").read_text(encoding="utf-8"),"old")
+
+    def test_zip_extraction_stages_all_entries_before_commit(self):
+        profile=self.store.create("ZIP staging",Path(self.temp.name)/"zip-staging","Paper")
+        service=SafeFileService(self.store)
+        root=Path(profile["directory"]);(root/"out").mkdir();(root/"out"/"old.txt").write_text("old",encoding="utf-8")
+        with zipfile.ZipFile(root/"source.zip","w") as archive:
+            archive.writestr("old.txt","new")
+            archive.writestr("broken.txt","bad")
+        original_open=zipfile.ZipFile.open
+        def fail_broken(archive,name,*args,**kwargs):
+            filename=name.filename if isinstance(name,zipfile.ZipInfo) else name
+            if filename=="broken.txt":raise zipfile.BadZipFile("simulated CRC failure")
+            return original_open(archive,name,*args,**kwargs)
+        with patch("web_panel.file_service.zipfile.ZipFile.open",new=fail_broken):
+            with self.assertRaisesRegex(zipfile.BadZipFile,"simulated CRC failure"):
+                service.unzip(profile["id"],"source.zip","out",conflict="overwrite")
+        self.assertEqual((root/"out"/"old.txt").read_text(encoding="utf-8"),"old")
+        self.assertFalse((root/"out"/"broken.txt").exists())
 
     def test_profile_update_and_delete(self):
         profile = self.store.create("Old", Path(self.temp.name) / "old", "Vanilla")
