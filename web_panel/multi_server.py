@@ -1,10 +1,14 @@
 import os
+import json
+import re
 import shutil
 import subprocess
 import threading
 import time
 import zipfile
 from pathlib import Path
+
+from core_metadata import minimum_java_version
 
 try:
     import psutil
@@ -39,14 +43,14 @@ class CoreAdapter:
         jars = sorted(directory.glob("*.jar"))
         return jars[0] if jars else None
 
-    def command(self, profile: dict):
+    def command(self, profile: dict, java_path=None):
         directory = Path(profile["directory"])
         launcher = self.find_launcher(directory, profile.get("launcher"))
         if not launcher:
             raise FileNotFoundError("找不到伺服器啟動檔，請先上傳或安裝核心")
         if launcher.suffix.lower() == ".bat":
             return [str(launcher)], True
-        java = profile.get("java_path") or "java"
+        java = java_path or profile.get("java_path") or "java"
         return [
             java,
             f"-Xms{int(profile.get('min_memory') or 1024)}M",
@@ -55,6 +59,82 @@ class CoreAdapter:
             launcher.name,
             "nogui",
         ], False
+
+    @staticmethod
+    def required_java_version(profile, launcher=None):
+        directory = Path(profile["directory"])
+        metadata = {}
+        try:
+            with (directory / "core-info.json").open(encoding="utf-8") as file:
+                metadata = json.load(file)
+        except (OSError, ValueError, TypeError):
+            pass
+        version = metadata.get("minecraft_version") or profile.get("minecraft_version")
+        if not version or not re.search(r"\d+\.\d+", str(version)):
+            launcher = launcher or CoreAdapter(profile["core_type"]).find_launcher(
+                directory, profile.get("launcher")
+            )
+            if launcher:
+                match = re.search(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)", launcher.name)
+                if match:
+                    version = match.group(1)
+        required = minimum_java_version(version)
+        try:
+            required = max(required, int(metadata.get("java_required") or 0))
+        except (TypeError, ValueError):
+            pass
+        return required, str(version or "未知版本")
+
+    @staticmethod
+    def java_major_version(executable):
+        result = subprocess.run(
+            [str(executable), "-version"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            check=False,
+        )
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        match = re.search(r'version\s+"(\d+)(?:\.(\d+))?', output, re.IGNORECASE)
+        if match:
+            major = int(match.group(1))
+            return int(match.group(2)) if major == 1 and match.group(2) else major
+        match = re.search(r"(?:openjdk|java)\s+(\d+)", output, re.IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    @classmethod
+    def resolve_java(cls, profile, required_version, minecraft_version):
+        configured = str(profile.get("java_path") or "java").strip().strip('"')
+        candidates = [configured]
+        path_java = shutil.which("java")
+        if path_java:
+            candidates.append(path_java)
+        checked = set()
+        found = []
+        for candidate in candidates:
+            executable = shutil.which(candidate) or candidate
+            if executable in checked:
+                continue
+            checked.add(executable)
+            try:
+                major = cls.java_major_version(executable)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                continue
+            if major:
+                found.append((executable, major))
+                if major >= required_version:
+                    return executable, major
+        requirement = f"Minecraft {minecraft_version} 需要 Java {required_version} 或更新版本。"
+        if found:
+            detected = ", ".join(f"Java {major}（{executable}）" for executable, major in found)
+            raise ValueError(
+                f"{requirement}目前找到的 Java 版本不足：{detected}。請到「伺服器設定 → Java 路徑」指定已安裝的 Java {required_version}+，再重新啟動。"
+            )
+        raise ValueError(
+            f"{requirement}找不到可執行的 Java。請安裝 Java {required_version}+，並在「伺服器設定 → Java 路徑」指定 java.exe（或將 Java 加入 PATH）。"
+        )
 
 
 class ServerProfileStore:
@@ -112,6 +192,8 @@ class ServerProfileStore:
         existing = next((item for item in self.list() if str(Path(item["directory"]).resolve()) == directory), None)
         if existing:
             return existing
+        if self.db.legacy_server_suppressed(directory):
+            return None
         return self.create("既有伺服器", directory, "Paper")
 
     def create(self, name, directory, core_type, **values):
@@ -147,6 +229,7 @@ class ServerProfileStore:
                  fields["launcher"], fields["auto_restart"], now, now),
             )
             profile_id = cursor.lastrowid
+        self.db.suppress_legacy_server(directory, False)
         return self.get(profile_id)
 
     def update(self, profile_id: int, values: dict):
@@ -179,6 +262,7 @@ class ServerProfileStore:
             raise KeyError("找不到伺服器")
         if delete_files:
             shutil.rmtree(profile["directory"], ignore_errors=False)
+        self.db.suppress_legacy_server(profile["directory"], True)
         with self.db._connect() as conn:
             conn.execute("DELETE FROM server_profiles WHERE id = ?", (profile_id,))
 
@@ -195,6 +279,7 @@ class MultiServerManager:
         self._phases = {}
         self._phase_at = {}
         self._io_samples = {}
+        self._core_updates = set()
 
     def _with_io_rates(self, profile_id, metrics):
         now=time.monotonic();read_bytes=float(metrics.pop("disk_read_bytes",0) or 0);write_bytes=float(metrics.pop("disk_write_bytes",0) or 0)
@@ -305,10 +390,26 @@ class MultiServerManager:
                 self._phase_at[profile_id] = time.time()
             return ok, message
         with self._lock:
+            if profile_id in self._core_updates:
+                return False, "伺服器核心更新中，完成後才能啟動"
             current = self._processes.get(profile_id)
             if current and current.poll() is None:
                 return False, "伺服器已經在運行中"
-            command, shell = CoreAdapter(profile["core_type"]).command(profile)
+            adapter = CoreAdapter(profile["core_type"])
+            launcher = adapter.find_launcher(Path(profile["directory"]), profile.get("launcher"))
+            if not launcher:
+                return False, "找不到伺服器啟動檔，請先上傳或安裝核心"
+            required_java, minecraft_version = adapter.required_java_version(profile, launcher)
+            try:
+                java_path, java_major = adapter.resolve_java(profile, required_java, minecraft_version)
+            except ValueError as exc:
+                return False, str(exc)
+            command, shell = adapter.command(profile, java_path)
+            java_bin = Path(java_path).resolve().parent
+            process_env = os.environ.copy()
+            if java_bin.is_dir():
+                process_env["JAVA_HOME"] = str(java_bin.parent)
+                process_env["PATH"] = str(java_bin) + os.pathsep + process_env.get("PATH", "")
             process = subprocess.Popen(
                 command,
                 cwd=profile["directory"],
@@ -319,13 +420,15 @@ class MultiServerManager:
                 encoding="utf-8",
                 errors="replace",
                 shell=shell,
+                env=process_env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             self._processes[profile_id] = process
             self._started_at[profile_id] = time.time()
             self._phases[profile_id] = "running"
             self._phase_at[profile_id] = time.time()
-            self._logs.setdefault(profile_id, []).append("---------- 伺服器正在啟動 ----------")
+            self._logs.setdefault(profile_id, []).append(f"使用 Java {java_major}：{java_path}")
+            self._logs[profile_id].append("---------- 伺服器正在啟動 ----------")
             threading.Thread(target=self._read_output, args=(profile_id, process), daemon=True).start()
             return True, "已送出啟動要求"
 

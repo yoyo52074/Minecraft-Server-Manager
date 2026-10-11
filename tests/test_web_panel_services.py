@@ -1,12 +1,17 @@
+import json
 import tempfile
+import time
 import unittest
 import uuid
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from web_panel.database import WebDatabase
 from web_panel.file_service import SafeFileService
-from web_panel.multi_server import CoreAdapter, ServerProfileStore
+from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
+from web_panel.core_update import CoreUpdateJobs
+from core_metadata import minimum_java_version
 
 
 class WebPanelServiceTests(unittest.TestCase):
@@ -25,6 +30,59 @@ class WebPanelServiceTests(unittest.TestCase):
         launcher = CoreAdapter("Fabric").find_launcher(directory)
         self.assertEqual(launcher.name, "fabric-server-launch.jar")
         self.assertEqual(profile["core_type"], "Fabric")
+
+    def test_minecraft_java_requirements(self):
+        self.assertEqual(minimum_java_version("1.20.4"), 17)
+        self.assertEqual(minimum_java_version("1.20.5"), 21)
+        self.assertEqual(minimum_java_version("1.21.4"), 21)
+        self.assertEqual(minimum_java_version("26.1"), 25)
+        self.assertEqual(minimum_java_version("27.0"), 25)
+
+    def test_server_start_rejects_java_below_minecraft_requirement(self):
+        directory = Path(self.temp.name) / "minecraft-26-1"
+        profile = self.store.create("Minecraft 26.1", directory, "Paper", minecraft_version="26.1", java_path="java")
+        (directory / "server.jar").write_bytes(b"placeholder")
+        manager = MultiServerManager(self.store)
+        with patch.object(CoreAdapter, "java_major_version", return_value=21), patch("web_panel.multi_server.subprocess.Popen") as popen:
+            ok, message = manager.start(profile["id"])
+        self.assertFalse(ok)
+        self.assertIn("Minecraft 26.1", message)
+        self.assertIn("Java 25", message)
+        self.assertIn("Java 21", message)
+        popen.assert_not_called()
+
+    def test_core_update_creates_backup_archives_old_jar_and_updates_profile(self):
+        directory=Path(self.temp.name)/"core-update"
+        profile=self.store.create("Old Paper",directory,"Paper",minecraft_version="1.21.4",launcher="old-paper.jar")
+        with zipfile.ZipFile(directory/"old-paper.jar","w") as archive:
+            archive.writestr("version.txt","old")
+        (directory/"world").mkdir()
+        (directory/"world"/"level.dat").write_text("world",encoding="utf-8")
+        manager=MultiServerManager(self.store)
+        updates=CoreUpdateJobs(self.store,manager)
+
+        def fake_download(core,version,progress):
+            path=directory/f"paper-{version}.jar"
+            with zipfile.ZipFile(path,"w") as archive:
+                archive.writestr("version.txt",version)
+            progress(100)
+            return str(path),"downloaded"
+
+        with patch("web_panel.core_update.ServerManager.download_server",side_effect=fake_download):
+            job_id=updates.start(profile["id"],"Paper","26.1")
+            for _ in range(200):
+                job=updates.get(job_id,profile["id"])
+                if job["status"] in {"completed","failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(job["status"],"completed",job)
+        updated=self.store.get(profile["id"])
+        self.assertEqual(updated["minecraft_version"],"26.1")
+        self.assertEqual(updated["launcher"],"paper-26.1.jar")
+        self.assertFalse((directory/"old-paper.jar").exists())
+        self.assertTrue(any((directory/"backups"/"cores").glob("*-old-paper.jar")))
+        self.assertTrue(any((directory/"backups").glob("backup-*.zip")))
+        self.assertEqual(json.loads((directory/"core-info.json").read_text(encoding="utf-8"))["java_required"],25)
 
     def test_file_service_rejects_path_traversal(self):
         profile = self.store.create("Paper", Path(self.temp.name) / "paper", "Paper")

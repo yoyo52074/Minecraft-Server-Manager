@@ -1,6 +1,24 @@
 import hashlib
 import json
 import os
+import re
+
+
+def minimum_java_version(minecraft_version):
+    """Return the minimum Java major version required by Minecraft."""
+    if not minecraft_version:
+        return 17
+    numbers = [int(value) for value in re.findall(r"\d+", str(minecraft_version))[:3]]
+    major = numbers[0] if numbers else 0
+    minor = numbers[1] if len(numbers) > 1 else 0
+    patch = numbers[2] if len(numbers) > 2 else 0
+    if major > 26 or (major == 26 and minor >= 1):
+        return 25
+    if major == 1 and minor >= 21:
+        return 21
+    if major == 1 and minor == 20 and patch >= 5:
+        return 21
+    return 17
 
 
 class CoreMetadata:
@@ -46,4 +64,4 @@ class CoreMetadata:
         return actual.lower() == expected.lower(), actual
 
 
-__all__ = ["CoreMetadata"]
+__all__ = ["CoreMetadata", "minimum_java_version"]

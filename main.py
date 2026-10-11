@@ -14,7 +14,7 @@ import tkinter as tk
 
 from server_manager import ServerManager
 from backup_manager import BackupManager
-from core_metadata import CoreMetadata
+from core_metadata import CoreMetadata, minimum_java_version
 from diagnostics import ServerDiagnostics
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, COLORS
 from web_panel.app import create_app
@@ -613,6 +613,10 @@ class ApplicationController:
         server_jar_path = jar_files[0]
         metadata = self.core_metadata.load()
         metadata_version = metadata.get("minecraft_version")
+        if not metadata_version:
+            selected_version = self.root.version_combo.get().strip()
+            if selected_version and "載入中" not in selected_version:
+                metadata_version = selected_version
         required_java = (
             self.get_required_java_version_for_version(metadata_version)
             if metadata_version
@@ -818,19 +822,7 @@ class ApplicationController:
         return self.get_required_java_version_for_version(versions[0])
 
     def get_required_java_version_for_version(self, version):
-        if not version:
-            return 17
-        numbers = [int(value) for value in re.findall(r"\d+", str(version))[:3]]
-        major = numbers[0] if numbers else 0
-        minor = numbers[1] if len(numbers) > 1 else 0
-        patch = numbers[2] if len(numbers) > 2 else 0
-        if major >= 26 and minor >= 1:
-            return 25
-        if major == 1 and minor >= 21:
-            return 21
-        if major == 1 and minor == 20 and patch >= 5:
-            return 21
-        return 17
+        return minimum_java_version(version)
 
     def download_java(self, java_major=17, start_after=False):
         """Download Java once at a time, then optionally retry the pending start."""

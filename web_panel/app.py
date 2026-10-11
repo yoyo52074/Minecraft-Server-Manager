@@ -14,6 +14,7 @@ from backup_manager import BackupJobManager, BackupManager
 from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import SafeFileService
+from .core_update import CoreUpdateJobs
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
@@ -35,11 +36,13 @@ def create_app(controller, database_path):
     legacy_profile = profiles.ensure_legacy(controller.server_directory)
     multi = MultiServerManager(profiles, controller.web_bridge)
     files = SafeFileService(profiles)
+    core_updates = CoreUpdateJobs(profiles, multi)
     app.state.db = db
     app.state.bridge = controller.web_bridge
     app.state.profiles = profiles
     app.state.multi = multi
     app.state.files = files
+    app.state.core_updates = core_updates
     app.state.players = PlayerManager(multi, db)
     app.state.backup_jobs = BackupJobManager(db)
     app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]), app.state.players)
@@ -95,7 +98,8 @@ def create_app(controller, database_path):
     def settings_page(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "settings.view")
         profile = profiles.get(profile_id)
-        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"])
+        can_edit_core = db.has_server_permission(user, profile_id, "settings.edit_startup")
+        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"], can_edit_core=can_edit_core)
 
     @app.get("/server/{profile_id}/history", response_class=HTMLResponse)
     def server_history_page(profile_id: int, request: Request):
@@ -198,6 +202,8 @@ def create_app(controller, database_path):
     async def update_server(profile_id: int, request: Request):
         user = require_user(request, {"admin"})
         check_csrf(request, user)
+        if profile_id in multi._core_updates:
+            raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再修改伺服器資料")
         try:
             profile = profiles.update(profile_id, await request.json())
         except (ValueError, KeyError, TypeError) as exc:
@@ -209,11 +215,15 @@ def create_app(controller, database_path):
     async def delete_server(profile_id: int, request: Request):
         user = require_user(request, {"admin"})
         check_csrf(request, user)
-        if multi.status(profile_id) and multi.status(profile_id)["running"]:
-            raise HTTPException(status_code=409, detail="請先停止伺服器")
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         try:
-            profiles.delete(profile_id, bool(payload.get("delete_files", False)))
+            with multi._lock:
+                current = multi.status(profile_id)
+                if profile_id in multi._core_updates:
+                    raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再移除伺服器")
+                if current and current["running"]:
+                    raise HTTPException(status_code=409, detail="請先停止伺服器")
+                profiles.delete(profile_id, bool(payload.get("delete_files", False)))
         except (ValueError, KeyError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "delete_server", str(profile_id))
@@ -316,6 +326,8 @@ def create_app(controller, database_path):
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
+        if profile_id in multi._core_updates:
+            raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再修改設定")
         payload = await request.json()
         properties = payload.get("properties", payload)
         profile_values = payload.get("profile", {})
@@ -355,6 +367,31 @@ def create_app(controller, database_path):
                    "snapshot": Path(snapshot).name}
         db.audit(user["user_id"], "update_settings", json.dumps(changes, ensure_ascii=False), server_id=profile_id)
         return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
+
+    @app.get("/api/servers/{profile_id}/core-update")
+    def latest_core_update(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "settings.view")
+        return {"job": core_updates.latest(profile_id)}
+
+    @app.get("/api/servers/{profile_id}/core-update/{job_id}")
+    def core_update_status(profile_id: int, job_id: str, request: Request):
+        require_server_permission(request, profile_id, "settings.view")
+        job = core_updates.get(job_id, profile_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="找不到核心更新工作")
+        return {"job": job}
+
+    @app.post("/api/servers/{profile_id}/core-update")
+    async def start_core_update(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "settings.edit_startup")
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            job_id = core_updates.start(profile_id, payload.get("core_type"), payload.get("version"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "start_core_update", f"{profile_id}:{payload.get('core_type')}:{payload.get('version')}", server_id=profile_id)
+        return {"job_id": job_id, "job": core_updates.get(job_id, profile_id)}
 
     @app.get("/server/{profile_id}/players", response_class=HTMLResponse)
     def players_page(profile_id: int, request: Request):

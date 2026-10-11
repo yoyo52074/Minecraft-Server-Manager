@@ -26,6 +26,24 @@ class WebDatabase:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    @staticmethod
+    def _legacy_suppression_key(directory):
+        return f"legacy_server_suppressed:{Path(directory).expanduser().resolve()}"
+
+    def legacy_server_suppressed(self, directory):
+        key = self._legacy_suppression_key(directory)
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM system_metadata WHERE key=?", (key,)).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def suppress_legacy_server(self, directory, suppressed=True):
+        key = self._legacy_suppression_key(directory)
+        with self._connect() as db:
+            if suppressed:
+                db.execute("INSERT OR REPLACE INTO system_metadata(key,value) VALUES(?, '1')", (key,))
+            else:
+                db.execute("DELETE FROM system_metadata WHERE key=?", (key,))
+
     def _init_schema(self):
         with self._connect() as db:
             db.executescript(

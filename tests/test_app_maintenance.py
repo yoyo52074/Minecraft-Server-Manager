@@ -2,6 +2,8 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from web_panel.app import create_app
@@ -82,6 +84,50 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/java").status_code,404)
         self.assertEqual(self.client.get("/api/java").status_code,404)
 
+    def test_dashboard_has_safe_server_remove_action(self):
+        response=self.client.get("/")
+        self.assertEqual(response.status_code,200)
+        self.assertIn("移除伺服器",response.text)
+        self.assertIn("世界檔案會保留",response.text)
+        self.assertIn("delete_files:false",response.text)
+
+    def test_delete_server_profile_preserves_server_directory(self):
+        directory=Path(self.temp.name)/"removable"
+        (directory/"world").mkdir(parents=True)
+        (directory/"world"/"level.dat").write_bytes(b"world-data")
+        profile=self.app.state.profiles.create("Removable",directory,"Paper")
+        response=self.client.request("DELETE",f"/api/servers/{profile['id']}",headers={"x-csrf-token":self.csrf},json={"delete_files":False})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertIsNone(self.app.state.profiles.get(profile["id"]))
+        self.assertEqual((directory/"world"/"level.dat").read_bytes(),b"world-data")
+
+    def test_removed_legacy_server_stays_removed_until_manually_readded(self):
+        response=self.client.request("DELETE",f"/api/servers/{self.profile_id}",headers={"x-csrf-token":self.csrf},json={"delete_files":False})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertIsNone(self.app.state.profiles.ensure_legacy(self.server_dir))
+        self.assertTrue(Path(self.server_dir,"server.properties").is_file())
+        recreated=self.app.state.profiles.create("重新新增",self.server_dir,"Paper")
+        self.assertEqual(self.app.state.profiles.ensure_legacy(self.server_dir)["id"],recreated["id"])
+
+    def test_settings_page_has_real_core_version_update_controls(self):
+        response=self.client.get(f"/server/{self.profile_id}/settings")
+        self.assertEqual(response.status_code,200,response.text[:500])
+        self.assertIn("變更 Minecraft 版本",response.text)
+        self.assertIn("/core-update",response.text)
+        self.assertIn("目標 Minecraft 版本",response.text)
+        self.assertIn("backups/cores",response.text)
+
+    def test_core_update_api_rejects_unsupported_core_and_running_server(self):
+        url=f"/api/servers/{self.profile_id}/core-update"
+        headers={"x-csrf-token":self.csrf}
+        unsupported=self.client.post(url,headers=headers,json={"core_type":"Forge","version":"1.21.4"})
+        self.assertEqual(unsupported.status_code,400)
+        self.assertIn("Paper 與 Vanilla",unsupported.json()["detail"])
+        with patch.object(self.app.state.multi,"status",return_value={"running":True,"phase":"running"}):
+            running=self.client.post(url,headers=headers,json={"core_type":"Paper","version":"1.21.4"})
+        self.assertEqual(running.status_code,400)
+        self.assertIn("停止伺服器",running.json()["detail"])
+
     def test_responsive_layout_styles_are_shared_across_management_pages(self):
         paths=("/",f"/server/{self.profile_id}",f"/server/{self.profile_id}/files",f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/monitor")
         for path in paths:
@@ -90,6 +136,19 @@ class MaintenanceApiTests(unittest.TestCase):
             self.assertIn('name="viewport" content="width=device-width, initial-scale=1"',response.text)
             self.assertIn("@media(max-width:640px)",response.text)
             self.assertIn("overflow-x:auto",response.text)
+
+    def test_start_api_explains_java_25_requirement_before_launch(self):
+        directory=Path(self.temp.name)/"minecraft-26-1"
+        profile=self.app.state.profiles.create("Minecraft 26.1",directory,"Paper",minecraft_version="26.1",java_path="java")
+        (directory/"server.jar").write_bytes(b"placeholder")
+        with patch("web_panel.multi_server.CoreAdapter.java_major_version",return_value=21), patch("web_panel.multi_server.subprocess.Popen") as popen:
+            response=self.client.post(f"/api/servers/{profile['id']}/start",headers={"x-csrf-token":self.csrf})
+        self.assertEqual(response.status_code,200)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("Minecraft 26.1",response.json()["message"])
+        self.assertIn("Java 25",response.json()["message"])
+        self.assertIn("Java 21",response.json()["message"])
+        popen.assert_not_called()
 
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
