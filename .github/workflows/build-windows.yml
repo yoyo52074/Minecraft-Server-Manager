@@ -48,6 +48,34 @@ jobs:
           }
           Get-Item "dist/Minecraft-Server-Manager.exe" | Format-List Name,Length,FullName
 
+      - name: Run EXE smoke test
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "dist/Minecraft-Server-Manager.exe" -WorkingDirectory "dist" -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:8765/login" -UseBasicParsing -TimeoutSec 2
+                if ($response.StatusCode -eq 200 -and $response.Content -match "建立第一位管理員") {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                # The desktop application may still be initializing.
+              }
+            }
+            if (-not $ready) {
+              throw "EXE started but Web panel did not respond on http://127.0.0.1:8765/login"
+            }
+            Write-Host "EXE smoke test passed: Web panel responded on port 8765"
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
