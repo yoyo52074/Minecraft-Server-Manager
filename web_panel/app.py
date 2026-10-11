@@ -4,6 +4,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Web
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from backup_manager import BackupManager
+from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
@@ -196,6 +198,85 @@ def create_app(controller, database_path):
         ok, message = multi.send_command(profile_id, str(payload.get("command", "")))
         db.audit(user["user_id"], "console_command", f"{profile_id}: {payload.get('command', '')}")
         return {"ok": ok, "message": message}
+
+    @app.get("/api/servers/{profile_id}/settings")
+    def server_settings(profile_id: int, request: Request):
+        require_user(request)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        return {"profile": profile, "properties": ServerManager(profile["directory"]).get_server_properties()}
+
+    @app.put("/api/servers/{profile_id}/settings")
+    async def update_server_settings(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        payload = await request.json()
+        properties = payload.get("properties", payload)
+        if not isinstance(properties, dict):
+            raise HTTPException(status_code=400, detail="設定格式錯誤")
+        if "server-port" in properties:
+            try:
+                port = int(properties["server-port"])
+                if not 1 <= port <= 65535:
+                    raise ValueError
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="伺服器連接埠必須介於 1 到 65535") from exc
+        try:
+            ServerManager(profile["directory"]).save_server_properties({str(k): str(v) for k, v in properties.items()})
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "update_settings", str(profile_id))
+        return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
+
+    @app.get("/api/servers/{profile_id}/backups")
+    def list_backups(profile_id: int, request: Request):
+        require_user(request)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        manager = BackupManager(profile["directory"])
+        return {"backups": [{"name": Path(path).name, "size": Path(path).stat().st_size, "modified_at": Path(path).stat().st_mtime} for path in manager.list_backups()]}
+
+    @app.post("/api/servers/{profile_id}/backups")
+    async def create_backup(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        status = multi.status(profile_id)
+        if status and status["running"]:
+            raise HTTPException(status_code=409, detail="建立備份前建議先停止伺服器")
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        path = BackupManager(profile["directory"]).create_backup(str(payload.get("label", "manual")))
+        db.audit(user["user_id"], "create_backup", f"{profile_id}:{Path(path).name}")
+        return {"ok": True, "name": Path(path).name}
+
+    @app.post("/api/servers/{profile_id}/backups/restore")
+    async def restore_backup(profile_id: int, request: Request):
+        user = require_user(request, {"admin"})
+        check_csrf(request, user)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        status = multi.status(profile_id)
+        if status and status["running"]:
+            raise HTTPException(status_code=409, detail="還原備份前必須先停止伺服器")
+        payload = await request.json()
+        backup = Path(profile["directory"]) / "backups" / str(payload.get("name", ""))
+        root = (Path(profile["directory"]) / "backups").resolve()
+        if backup.resolve().parent != root or backup.suffix.lower() != ".zip":
+            raise HTTPException(status_code=400, detail="無效的備份檔")
+        try:
+            path = BackupManager(profile["directory"]).restore_backup(str(backup))
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "restore_backup", f"{profile_id}:{Path(path).name}")
+        return {"ok": True}
 
     @app.get("/api/servers/{profile_id}/files")
     def list_files(profile_id: int, request: Request, path: str = ""):

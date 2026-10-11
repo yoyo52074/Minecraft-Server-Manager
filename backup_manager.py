@@ -10,7 +10,10 @@ class BackupManager:
         "server.properties", "eula.txt", "ops.json", "whitelist.json",
         "banned-players.json", "banned-ips.json", "core-info.json",
     }
-    INCLUDED_DIRS = {"world", "world_nether", "world_the_end", "plugins"}
+    INCLUDED_DIRS = {
+        "world", "world_nether", "world_the_end", "plugins", "mods", "config",
+        "resourcepacks", "datapacks", "logs", "crash-reports",
+    }
 
     def __init__(self, server_directory):
         self.server_directory = os.path.abspath(server_directory)
