@@ -83,11 +83,11 @@ class ApplicationController:
             ))
             self.web_thread = threading.Thread(target=self.web_server.run, daemon=True)
             self.web_thread.start()
-            print(f"Web 面板已啟動：http://{self.web_panel_host}:{self.web_panel_port}")
+            print(f"Web panel started: http://{self.web_panel_host}:{self.web_panel_port}")
         except Exception as exc:
             self.web_server = None
             self.web_thread = None
-            print(f"Web 面板啟動失敗：{exc}")
+            print(f"Web panel failed to start: {exc}")
 
     def stop_web_panel(self):
         if self.web_server:
