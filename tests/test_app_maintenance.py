@@ -82,6 +82,15 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/java").status_code,404)
         self.assertEqual(self.client.get("/api/java").status_code,404)
 
+    def test_responsive_layout_styles_are_shared_across_management_pages(self):
+        paths=("/",f"/server/{self.profile_id}",f"/server/{self.profile_id}/files",f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/monitor")
+        for path in paths:
+            response=self.client.get(path)
+            self.assertEqual(response.status_code,200,(path,response.text[:300]))
+            self.assertIn('name="viewport" content="width=device-width, initial-scale=1"',response.text)
+            self.assertIn("@media(max-width:640px)",response.text)
+            self.assertIn("overflow-x:auto",response.text)
+
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
         retention = self.client.put(f"/api/servers/{self.profile_id}/backups/retention", headers=headers, json={"retain_count": 2, "max_age_days": 30})
