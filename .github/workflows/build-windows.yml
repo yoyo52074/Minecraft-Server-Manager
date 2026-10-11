@@ -32,7 +32,13 @@ jobs:
           --icon my_logo.ico
           --add-binary "playit.exe;."
           --collect-all ttkbootstrap
+          --collect-all uvicorn
+          --collect-all fastapi
+          --collect-all argon2
+          --add-data "web_panel/templates;web_panel/templates"
+          --add-data "web_panel/static;web_panel/static"
           --hidden-import requests
+          --hidden-import multipart
           main.py
 
       - name: Verify EXE

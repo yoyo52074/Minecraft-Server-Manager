@@ -15,6 +15,8 @@ from backup_manager import BackupManager
 from core_metadata import CoreMetadata
 from diagnostics import ServerDiagnostics
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, COLORS
+from web_panel.app import create_app
+from web_panel.bridge import ServerBridge
 
 
 class ApplicationController:
@@ -30,6 +32,12 @@ class ApplicationController:
         self.backup_manager = BackupManager(self.server_directory)
         self.core_metadata = CoreMetadata(self.server_directory)
         self.diagnostics = ServerDiagnostics(self.server_directory)
+        self.web_panel_host = config.get("web_host", "127.0.0.1")
+        self.web_panel_port = int(config.get("web_port", 8765))
+        self.web_bridge = ServerBridge(self)
+        self.web_bridge.attach()
+        self.web_server = None
+        self.web_thread = None
         self.root.core_combo.bind("<<ComboboxSelected>>", self.on_core_selected)
         self.root.advanced_settings_button.config(command=self.open_advanced_settings)
         self.root.save_settings_button.config(command=self.save_inline_settings)
@@ -57,7 +65,35 @@ class ApplicationController:
             self.playit_executable_path = os.path.join(sys._MEIPASS, "playit.exe")
         else:
             self.playit_executable_path = os.path.join(self.app_directory, "playit.exe")
+        self.start_web_panel()
         self.root.after(100, self.initialize)
+
+    def start_web_panel(self):
+        """Run the authenticated local web panel beside the desktop UI."""
+        try:
+            from uvicorn import Config, Server
+
+            app = create_app(self, os.path.join(self.app_directory, "web_panel.db"))
+            self.web_server = Server(Config(
+                app,
+                host=self.web_panel_host,
+                port=self.web_panel_port,
+                log_level="warning",
+                access_log=False,
+            ))
+            self.web_thread = threading.Thread(target=self.web_server.run, daemon=True)
+            self.web_thread.start()
+            print(f"Web 面板已啟動：http://{self.web_panel_host}:{self.web_panel_port}")
+        except Exception as exc:
+            self.web_server = None
+            self.web_thread = None
+            print(f"Web 面板啟動失敗：{exc}")
+
+    def stop_web_panel(self):
+        if self.web_server:
+            self.web_server.should_exit = True
+            self.web_server = None
+            self.web_thread = None
 
     def start_indeterminate_progress(self, speed=10):
         self.root.progress_bar.config(mode="indeterminate")
@@ -686,6 +722,7 @@ class ApplicationController:
             return
         if self.playit_process:
             self.stop_playit_tunnel()
+        self.stop_web_panel()
         self.root.destroy()
 
     def get_creation_flags(self):
