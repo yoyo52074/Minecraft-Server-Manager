@@ -5,7 +5,8 @@
 > 最後更新：2026-10-12  
 > 專案：`yoyo52074/Minecraft-Server-Manager`  
 > 目前分支：`main`  
-> 最新提交：`3dcbd13 fix: remove duplicate server settings link`
+> 功能基線提交：`3dcbd13 fix: remove duplicate server settings link`  
+> 交接文件提交：`6db91f7 docs: add engineering handoff report`
 
 ---
 
@@ -32,7 +33,8 @@
 
 ```text
 分支：main
-最新提交：3dcbd13
+目前 HEAD：6db91f7（本交接文件提交）  
+功能基線：3dcbd13（設定入口修正）
 工作樹：已驗證乾淨
 ```
 
