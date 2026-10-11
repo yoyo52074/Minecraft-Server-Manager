@@ -11,6 +11,7 @@ from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS
+from .operations import JavaManager, PlayerManager, Scheduler
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -28,6 +29,9 @@ def create_app(controller, database_path):
     app.state.profiles = profiles
     app.state.multi = multi
     app.state.files = files
+    app.state.java = JavaManager()
+    app.state.players = PlayerManager(multi)
+    app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]))
 
     def current_user(request: Request):
         return db.get_session(request.cookies.get("mcm_session"))
@@ -191,6 +195,14 @@ def create_app(controller, database_path):
         db.audit(user["user_id"], "delete_server", str(profile_id))
         return {"ok": True}
 
+    @app.post("/api/servers/{profile_id}/schedules")
+    async def create_schedule_before_action(profile_id: int, request: Request):
+        user=require_server_permission(request, profile_id, "schedule.create")
+        check_csrf(request, user)
+        payload=await request.json()
+        app.state.scheduler.create(profile_id, str(payload.get("name", "排程")), str(payload.get("action", "backup")), int(payload.get("interval_seconds", 3600)))
+        return {"ok": True}
+
     @app.post("/api/servers/{profile_id}/{action}")
     def server_action(profile_id: int, action: str, request: Request):
         permission = {"start": "server.start", "stop": "server.stop", "force-stop": "server.force_stop"}.get(action)
@@ -209,6 +221,11 @@ def create_app(controller, database_path):
         if not profiles.get(profile_id):
             raise HTTPException(status_code=404, detail="找不到伺服器")
         return {"logs": multi.logs(profile_id, limit)}
+
+    @app.get("/api/servers/{profile_id}/metrics")
+    def metrics_history(profile_id: int, request: Request, limit: int = 120):
+        require_server_permission(request, profile_id, "resources.view")
+        return {"metrics": app.state.db.recent_metrics(profile_id, min(max(limit, 1), 1440))}
 
     @app.post("/api/servers/{profile_id}/console")
     async def server_console(profile_id: int, request: Request):
@@ -261,6 +278,59 @@ def create_app(controller, database_path):
         db.audit(user["user_id"], "update_settings", str(profile_id))
         return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
 
+    @app.get("/java", response_class=HTMLResponse)
+    def java_page(request: Request):
+        user = require_user(request, {"admin"})
+        return render(request, "java.html", java_versions=app.state.java.list(), csrf=user["csrf_token"])
+
+    @app.get("/api/java")
+    def java_scan(request: Request):
+        require_user(request, {"admin"})
+        return {"java": app.state.java.list()}
+
+    @app.get("/server/{profile_id}/players", response_class=HTMLResponse)
+    def players_page(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "players.view")
+        profile = profiles.get(profile_id)
+        return render(request, "players.html", profile=profile, players=app.state.players.list(profile_id), csrf=user["csrf_token"])
+
+    @app.get("/api/servers/{profile_id}/players")
+    def players_api(profile_id: int, request: Request):
+        require_server_permission(request, profile_id, "players.view")
+        return {"players": app.state.players.list(profile_id)}
+
+    @app.post("/api/servers/{profile_id}/players/{action}")
+    async def player_action(profile_id: int, action: str, request: Request):
+        user = require_server_permission(request, profile_id, "players.view")
+        check_csrf(request, user); payload=await request.json(); player=str(payload.get("player", "")).strip()
+        if action in {"kick","ban","pardon","op","deop","whitelist_add","whitelist_remove"}:
+            perm = "players.unban" if action=="pardon" else "players.whitelist" if action.startswith("whitelist") else f"players.{action}"
+            require_server_permission(request, profile_id, perm)
+        ok,message=app.state.players.command(profile_id,action,player); db.audit(user["user_id"],"player_"+action,f"{profile_id}:{player}"); return {"ok":ok,"message":message}
+
+    @app.get("/server/{profile_id}/schedules", response_class=HTMLResponse)
+    def schedules_page(profile_id: int, request: Request):
+        user=require_server_permission(request,profile_id,"schedule.view"); return render(request,"schedules.html",profile=profiles.get(profile_id),schedules=app.state.scheduler.list(profile_id),csrf=user["csrf_token"])
+
+    @app.get("/api/servers/{profile_id}/schedules")
+    def schedules_api(profile_id:int,request:Request): require_server_permission(request,profile_id,"schedule.view"); return {"schedules":app.state.scheduler.list(profile_id)}
+
+    @app.post("/api/servers/{profile_id}/schedules")
+    async def create_schedule(profile_id:int,request:Request):
+        user=require_server_permission(request,profile_id,"schedule.create");check_csrf(request,user);p=await request.json();app.state.scheduler.create(profile_id,str(p.get("name","排程")),str(p.get("action","backup")),int(p.get("interval_seconds",3600)));return {"ok":True}
+
+    @app.post("/api/schedules/{schedule_id}/toggle")
+    def toggle_schedule(schedule_id:int,request:Request):
+        item=app.state.scheduler.get(schedule_id)
+        if not item: raise HTTPException(status_code=404,detail="找不到排程")
+        user=require_server_permission(request,item["server_id"],"schedule.edit");check_csrf(request,user);app.state.scheduler.toggle(schedule_id);return {"ok":True}
+
+    @app.delete("/api/schedules/{schedule_id}")
+    def delete_schedule(schedule_id:int,request:Request):
+        item=app.state.scheduler.get(schedule_id)
+        if not item: raise HTTPException(status_code=404,detail="找不到排程")
+        user=require_server_permission(request,item["server_id"],"schedule.delete");check_csrf(request,user);app.state.scheduler.delete(schedule_id);return {"ok":True}
+
     @app.get("/api/servers/{profile_id}/backups")
     def list_backups(profile_id: int, request: Request):
         require_server_permission(request, profile_id, "backups.view")
@@ -269,6 +339,24 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=404, detail="找不到伺服器")
         manager = BackupManager(profile["directory"])
         return {"backups": [{"name": Path(path).name, "size": Path(path).stat().st_size, "modified_at": Path(path).stat().st_mtime} for path in manager.list_backups()]}
+
+    @app.get("/server/{profile_id}/backups", response_class=HTMLResponse)
+    def backups_page(profile_id:int,request:Request):
+        user=require_server_permission(request,profile_id,"backups.view"); profile=profiles.get(profile_id); manager=BackupManager(profile["directory"])
+        items=[{"name":Path(p).name,"size":Path(p).stat().st_size,"modified_at":Path(p).stat().st_mtime} for p in manager.list_backups()]
+        return render(request,"backups.html",profile=profile,backups=items,csrf=user["csrf_token"])
+
+    @app.get("/api/servers/{profile_id}/backups/{name}/download")
+    def download_backup(profile_id:int,name:str,request:Request):
+        require_server_permission(request,profile_id,"backups.download");profile=profiles.get(profile_id);root=(Path(profile["directory"])/"backups").resolve();target=(root/name).resolve()
+        if target.parent!=root or not target.is_file(): raise HTTPException(status_code=404,detail="找不到備份")
+        return FileResponse(target,filename=target.name)
+
+    @app.delete("/api/servers/{profile_id}/backups/{name}")
+    def delete_backup(profile_id:int,name:str,request:Request):
+        user=require_server_permission(request,profile_id,"backups.delete");profile=profiles.get(profile_id);root=(Path(profile["directory"])/"backups").resolve();target=(root/name).resolve()
+        if target.parent!=root or target.suffix.lower()!='.zip': raise HTTPException(status_code=400,detail="無效的備份")
+        target.unlink(missing_ok=False);db.audit(user["user_id"],"delete_backup",f"{profile_id}:{name}");return {"ok":True}
 
     @app.post("/api/servers/{profile_id}/backups")
     async def create_backup(profile_id: int, request: Request):

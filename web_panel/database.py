@@ -59,6 +59,18 @@ class WebDatabase:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(user_id, server_id, permission_key)
                 );
+                CREATE TABLE IF NOT EXISTS resource_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL,
+                    recorded_at REAL NOT NULL,
+                    cpu_percent REAL NOT NULL,
+                    memory_mb REAL NOT NULL,
+                    memory_percent REAL NOT NULL,
+                    disk_used_percent REAL NOT NULL,
+                    disk_free_gb REAL NOT NULL,
+                    net_sent_mb REAL NOT NULL,
+                    net_recv_mb REAL NOT NULL
+                );
                 """
             )
 
@@ -197,3 +209,12 @@ class WebDatabase:
                 [(user_id, server_id, permission, now) for permission in selected],
             )
         return selected
+
+    def record_metrics(self, server_id: int, metrics: dict):
+        with self._connect() as db:
+            db.execute("INSERT INTO resource_metrics(server_id,recorded_at,cpu_percent,memory_mb,memory_percent,disk_used_percent,disk_free_gb,net_sent_mb,net_recv_mb) VALUES(?,?,?,?,?,?,?,?,?)", (server_id, __import__('time').time(), metrics.get('cpu_percent',0), metrics.get('memory_mb',0), metrics.get('memory_percent',0), metrics.get('disk_used_percent',0), metrics.get('disk_free_gb',0), metrics.get('net_sent_mb',0), metrics.get('net_recv_mb',0)))
+            db.execute("DELETE FROM resource_metrics WHERE recorded_at < ?", (__import__('time').time()-86400,))
+
+    def recent_metrics(self, server_id: int, limit=120):
+        with self._connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM resource_metrics WHERE server_id=? ORDER BY id DESC LIMIT ?", (server_id, limit)).fetchall()][::-1]

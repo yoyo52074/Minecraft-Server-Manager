@@ -10,6 +10,7 @@ import time
 import traceback
 import requests
 from tkinter import messagebox, filedialog
+import tkinter as tk
 
 from server_manager import ServerManager
 from backup_manager import BackupManager
@@ -934,6 +935,30 @@ class ApplicationController:
             self.root.start_button.config(state="normal")
 
 
+def show_simplified_launcher(root, app):
+    """Show only Web panel status by default; full Tk UI remains --legacy-ui."""
+    root.withdraw()
+    window = tk.Toplevel(root)
+    window.title("Minecraft Server Manager｜Web 面板")
+    window.geometry("520x280")
+    window.resizable(False, False)
+    tk.Label(window, text="Minecraft Server Manager", font=("Segoe UI", 18, "bold")).pack(pady=(24, 6))
+    status = tk.Label(window, text="Web 面板啟動中…", font=("Segoe UI", 11))
+    status.pack(pady=8)
+    url = f"http://{app.web_panel_host}:{app.web_panel_port}"
+    tk.Label(window, text=url, fg="#42a5f5", font=("Segoe UI", 11)).pack(pady=4)
+    actions = tk.Frame(window); actions.pack(pady=18)
+    tk.Button(actions, text="開啟 Web 面板", command=lambda: __import__("webbrowser").open(url), width=18).pack(side="left", padx=5)
+    tk.Button(actions, text="停止所有伺服器並關閉", command=app.on_closing, width=22).pack(side="left", padx=5)
+    window.protocol("WM_DELETE_WINDOW", app.on_closing)
+    def refresh():
+        try:
+            info=app.web_bridge.status(); text=f"Web 面板：運作中\n伺服器：{'運行中' if info.get('running') else '已停止'}"
+            status.config(text=text, fg="#4caf50" if info.get('running') else "#9ba8b6")
+        except Exception as exc: status.config(text=f"狀態讀取失敗：{exc}", fg="#ef5350")
+        window.after(1000, refresh)
+    refresh()
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         try:
@@ -946,4 +971,6 @@ if __name__ == "__main__":
 
     root = MainAppWindow()
     app = ApplicationController(root)
+    if "--legacy-ui" not in sys.argv:
+        show_simplified_launcher(root, app)
     root.mainloop()

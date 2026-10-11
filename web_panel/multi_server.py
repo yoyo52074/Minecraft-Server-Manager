@@ -173,6 +173,7 @@ class ServerProfileStore:
 class MultiServerManager:
     def __init__(self, store, legacy_bridge=None):
         self.store = store
+        self.db = store.db
         self.legacy_bridge = legacy_bridge
         self._lock = threading.RLock()
         self._processes = {}
@@ -198,6 +199,7 @@ class MultiServerManager:
                     self._phases[profile_id] = phase
             result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase})
             result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"])
+            self.db.record_metrics(profile_id, result["metrics"])
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -206,6 +208,8 @@ class MultiServerManager:
             self._started_at.pop(profile_id, None)
             if self._phases.get(profile_id) not in {"error", "stopped"}:
                 self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
+        metrics = self._metrics(process, profile["directory"])
+        self.db.record_metrics(profile_id, metrics)
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],
@@ -213,7 +217,7 @@ class MultiServerManager:
             "phase": self._phases.get(profile_id, "running" if running else "stopped"),
             "uptime_seconds": int(time.time() - self._started_at[profile_id]) if running and profile_id in self._started_at else 0,
             "logs": self._logs.get(profile_id, [])[-100:],
-            "metrics": self._metrics(process, profile["directory"]),
+            "metrics": metrics,
         }
 
     @staticmethod
