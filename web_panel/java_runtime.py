@@ -165,6 +165,7 @@ class JavaRuntimeJobs:
                 "id": job_id, "server_id": server_id, "status": "queued",
                 "stage": "search", "message": "正在搜尋電腦上已安裝的 Java…",
                 "required_version": required_major, "java_path": "", "java_version": 0,
+                "progress": 0, "downloaded_bytes": 0, "total_bytes": 0,
                 "error": "", "start_after": bool(start_after), "start_result": None,
                 "created_at": time.time(), "finished_at": None,
             }
@@ -204,7 +205,7 @@ class JavaRuntimeJobs:
                 self._apply(job_id, profile, suitable["path"], suitable["version"], "自動偵測", actor_id, start_after)
                 return
             self._update(job_id, stage="download", message=f"找不到 Java {required}+，正在自動下載 Temurin Java {required}…")
-            path = self._download_and_install(required)
+            path = self._download_and_install(required, job_id)
             major = self._version(path)
             if major < required:
                 raise RuntimeError(f"下載的 Java 版本不足：Java {major}，需求 Java {required}+。")
@@ -213,7 +214,7 @@ class JavaRuntimeJobs:
             self._update(job_id, status="failed", stage="failed", error=str(exc),
                          message="Java 搜尋／自動安裝失敗。可手動輸入 java.exe 路徑後再試。", finished_at=time.time())
 
-    def _download_and_install(self, major):
+    def _download_and_install(self, major, job_id=None):
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         final_dir = self.runtime_root / f"jdk-{major}"
         executable = final_dir / "bin" / ("java.exe" if os.name == "nt" else "java")
@@ -229,23 +230,69 @@ class JavaRuntimeJobs:
         try:
             with requests.get(url, stream=True, allow_redirects=True, timeout=(20, 90)) as response:
                 response.raise_for_status()
+                try:
+                    total_bytes = max(0, int(response.headers.get("content-length", 0)))
+                except (TypeError, ValueError):
+                    total_bytes = 0
+                if job_id:
+                    self._update(job_id, stage="download", progress=0, downloaded_bytes=0,
+                                 total_bytes=total_bytes, message=f"正在下載 Temurin Java {major}…")
+                downloaded_bytes = 0
                 with archive_path.open("wb") as output:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             output.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            if job_id:
+                                progress = min(100, int(downloaded_bytes * 100 / total_bytes)) if total_bytes else 0
+                                self._update(job_id, progress=progress, downloaded_bytes=downloaded_bytes,
+                                             total_bytes=total_bytes,
+                                             message=f"正在下載 Temurin Java {major}…")
             extract_dir.mkdir()
+            if job_id:
+                self._update(job_id, stage="verify", progress=0,
+                             message="下載完成，正在驗證 Java 安裝檔…")
             with zipfile.ZipFile(archive_path) as archive:
-                for member in archive.infolist():
+                members = archive.infolist()
+                for member in members:
                     member_path = PurePosixPath(member.filename.replace("\\", "/"))
                     if member_path.is_absolute() or re.match(r"^[A-Za-z]:", member.filename) or ".." in member_path.parts:
                         raise RuntimeError("Java 安裝壓縮檔含有不安全路徑，已停止解壓。")
-                archive.extractall(extract_dir)
+                damaged_member = archive.testzip()
+                if damaged_member:
+                    raise RuntimeError(f"Java 安裝檔 CRC 驗證失敗：{damaged_member}")
+                extract_total = sum(item.file_size for item in members if not item.is_dir())
+                extract_bytes = 0
+                if job_id:
+                    self._update(job_id, stage="install", progress=0,
+                                 message=f"Java 安裝檔驗證完成，正在解壓 Java {major}…")
+                for member in members:
+                    member_path = PurePosixPath(member.filename.replace("\\", "/"))
+                    target = extract_dir.joinpath(*member_path.parts)
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member, "r") as source, target.open("wb") as output:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                            extract_bytes += len(chunk)
+                            if job_id:
+                                progress = min(100, int(extract_bytes * 100 / extract_total)) if extract_total else 100
+                                self._update(job_id, progress=progress,
+                                             message=f"正在解壓 Java {major}…")
             executables = list(extract_dir.glob("*/bin/java.exe"))
             if not executables:
                 raise RuntimeError("下載內容未包含有效的 Java 執行檔。")
             extracted_root = executables[0].parent.parent
             shutil.move(str(extracted_root), str(staged_dir))
             staged_java = staged_dir / "bin" / "java.exe"
+            if job_id:
+                self._update(job_id, stage="verify", progress=100,
+                             message="解壓完成，正在確認 Java 版本…")
             detected = self._version(staged_java)
             if detected < major:
                 raise RuntimeError(f"下載檔案版本驗證失敗：Java {detected}，需求 Java {major}+。")
