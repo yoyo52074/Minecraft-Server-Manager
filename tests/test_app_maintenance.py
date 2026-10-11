@@ -65,9 +65,12 @@ class MaintenanceApiTests(unittest.TestCase):
             if path.endswith("/monitor"):
                 self.assertIn("max-width:100%", response.text)
                 self.assertIn('class="monitor-chart"', response.text)
-                self.assertIn("伺服器配置上限", response.text)
+                self.assertIn("配置上限", response.text)
                 self.assertIn("disk-used", response.text)
-                self.assertIn("整機總 CPU", response.text)
+                self.assertIn("整機總運算能力", response.text)
+                self.assertIn("TPS", response.text)
+                self.assertIn("MSPT", response.text)
+                self.assertIn("Java Heap", response.text)
 
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
@@ -97,6 +100,64 @@ class MaintenanceApiTests(unittest.TestCase):
         history = self.client.get(f"/api/servers/{self.profile_id}/history")
         self.assertEqual(history.status_code, 200, history.text)
         self.assertTrue(any(row["action"] == "update_alert_thresholds" for row in history.json()["operations"]))
+
+    def test_backup_scope_jobs_and_settings_snapshot_retention(self):
+        headers={"x-csrf-token":self.csrf};profile=self.app.state.profiles.get(self.profile_id)
+        os.makedirs(os.path.join(profile["directory"],"world"),exist_ok=True)
+        with open(os.path.join(profile["directory"],"world","level.dat"),"w") as f:f.write("world")
+        retention=self.client.put(f"/api/servers/{self.profile_id}/backups/settings-retention",headers=headers,json={"retain_count":3,"max_age_days":30})
+        self.assertEqual(retention.status_code,200,retention.text)
+        created=self.client.post(f"/api/servers/{self.profile_id}/backups",headers=headers,json={"label":"world-test","scope":"worlds"})
+        self.assertEqual(created.status_code,200,created.text)
+        task_id=created.json()["task_id"]
+        for _ in range(100):
+            state=self.client.get(f"/api/servers/{self.profile_id}/backups/jobs/{task_id}").json()
+            if state["status"] in {"completed","failed"}:break
+            time.sleep(.02)
+        self.assertEqual(state["status"],"completed")
+        history=self.client.get(f"/api/servers/{self.profile_id}/backups/jobs?limit=20")
+        self.assertEqual(history.status_code,200,history.text)
+        self.assertEqual(history.json()["jobs"][0]["scope"],"worlds")
+
+    def test_schedule_advanced_api_and_player_history_api(self):
+        headers={"x-csrf-token":self.csrf}
+        created=self.client.post(f"/api/servers/{self.profile_id}/schedules",headers=headers,json={"name":"每日存檔","action":"command_save_all","schedule_type":"daily","run_time":"04:10","ready_timeout_seconds":0,"retry_count":1})
+        self.assertEqual(created.status_code,200,created.text);schedule_id=created.json()["schedule"]["id"]
+        schedules=self.client.get(f"/api/servers/{self.profile_id}/schedules")
+        self.assertEqual(schedules.status_code,200);self.assertEqual(schedules.json()["schedules"][0]["schedule_type"],"daily")
+        updated=self.client.put(f"/api/schedules/{schedule_id}",headers=headers,json={"name":"每日安全存檔","action":"command_save_all","schedule_type":"daily","run_time":"04:20","ready_timeout_seconds":0,"retry_count":0})
+        self.assertEqual(updated.status_code,200,updated.text)
+        run=self.client.post(f"/api/schedules/{schedule_id}/run",headers=headers)
+        self.assertEqual(run.status_code,200,run.text);self.assertEqual(run.json()["result"],"queued")
+        for _ in range(100):
+            runs=self.client.get(f"/api/servers/{self.profile_id}/schedule-runs").json()["runs"]
+            if runs:break
+            time.sleep(.02)
+        self.assertTrue(runs);self.assertEqual(runs[0]["result"],"ok")
+        self.assertEqual(self.client.get(f"/api/servers/{self.profile_id}/players/history").status_code,200)
+        self.assertIn("玩家名稱",self.client.get(f"/api/servers/{self.profile_id}/players/export.csv").text)
+
+    def test_file_version_api_restores_saved_content(self):
+        headers={"x-csrf-token":self.csrf};path="server.properties"
+        edited=self.client.put(f"/api/servers/{self.profile_id}/files/text",headers=headers,json={"path":path,"content":"motd=changed\n"})
+        self.assertEqual(edited.status_code,200,edited.text)
+        versions=self.client.get(f"/api/servers/{self.profile_id}/files/versions",params={"path":path})
+        self.assertEqual(versions.status_code,200,versions.text);self.assertEqual(len(versions.json()["versions"]),1)
+        version_id=versions.json()["versions"][0]["version_id"]
+        restored=self.client.post(f"/api/servers/{self.profile_id}/files/versions/restore",headers=headers,json={"path":path,"version_id":version_id})
+        self.assertEqual(restored.status_code,200,restored.text)
+        content=self.client.get(f"/api/servers/{self.profile_id}/files/text",params={"path":path})
+        self.assertIn("motd=hello",content.json()["content"])
+        self.assertTrue(any(row["action"]=="restore_file_version" for row in self.app.state.db.server_audit_logs(self.profile_id,20)))
+
+    def test_alert_notification_webhook_is_masked_in_api(self):
+        headers={"x-csrf-token":self.csrf}
+        saved=self.client.put(f"/api/servers/{self.profile_id}/alert-notifications",headers=headers,json={"webhook_url":"https://discord.com/api/webhooks/123/secret","cooldown_seconds":600})
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertTrue(saved.json()["webhook_configured"])
+        self.assertNotIn("webhook_url",saved.json())
+        fetched=self.client.get(f"/api/servers/{self.profile_id}/alert-notifications")
+        self.assertEqual(fetched.status_code,200);self.assertNotIn("secret",fetched.text)
 
     def test_account_edit_password_reset_and_delete(self):
         managed_id = self.app.state.db.create_user("old-name", "Old-password-123", "viewer")

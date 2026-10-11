@@ -194,6 +194,18 @@ class MultiServerManager:
         self._started_at = {}
         self._phases = {}
         self._phase_at = {}
+        self._io_samples = {}
+
+    def _with_io_rates(self, profile_id, metrics):
+        now=time.monotonic();read_bytes=float(metrics.pop("disk_read_bytes",0) or 0);write_bytes=float(metrics.pop("disk_write_bytes",0) or 0)
+        previous=self._io_samples.get(profile_id);read_rate=write_rate=0.0
+        if previous:
+            elapsed=max(now-previous[0],0.001)
+            if read_bytes>=previous[1]:read_rate=(read_bytes-previous[1])/1024**2/elapsed
+            if write_bytes>=previous[2]:write_rate=(write_bytes-previous[2])/1024**2/elapsed
+        self._io_samples[profile_id]=(now,read_bytes,write_bytes)
+        metrics["disk_read_mb_s"]=round(read_rate,3);metrics["disk_write_mb_s"]=round(write_rate,3)
+        return metrics
 
     def _is_legacy(self, profile):
         return self.legacy_bridge and str(Path(profile["directory"]).resolve()) == str(Path(self.legacy_bridge.controller.server_directory).resolve())
@@ -213,7 +225,7 @@ class MultiServerManager:
                     phase = "error" if phase == "starting" else "stopped"
                     self._phases[profile_id] = phase
             result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase, "phase_timeout": timeout_phase})
-            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"], profile.get("max_memory"))
+            result["metrics"] = self._with_io_rates(profile_id,self._metrics(self.legacy_bridge.controller.server_process, profile["directory"], profile.get("max_memory")))
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -222,7 +234,7 @@ class MultiServerManager:
             self._started_at.pop(profile_id, None)
             if self._phases.get(profile_id) not in {"error", "stopped"}:
                 self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
-        metrics = self._metrics(process, profile["directory"], profile.get("max_memory"))
+        metrics = self._with_io_rates(profile_id,self._metrics(process, profile["directory"], profile.get("max_memory")))
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],
@@ -235,7 +247,7 @@ class MultiServerManager:
 
     @staticmethod
     def _metrics(process, directory=None, memory_limit_mb=None):
-        disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "disk_used_gb": 0.0, "disk_total_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0}
+        disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "disk_used_gb": 0.0, "disk_total_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0,"disk_read_bytes":0,"disk_write_bytes":0}
         available = psutil is not None
         if psutil is not None:
             try:
@@ -256,6 +268,9 @@ class MultiServerManager:
         try:
             proc = psutil.Process(process.pid)
             memory_mb = round(proc.memory_info().rss / 1024 / 1024, 1)
+            try:
+                io=proc.io_counters();disk_read_bytes=int(io.read_bytes);disk_write_bytes=int(io.write_bytes)
+            except Exception:disk_read_bytes=disk_write_bytes=0
             cpu_count = psutil.cpu_count(logical=True) or 1
             return {
                 # Process.cpu_percent() can exceed 100 on multi-core hosts; normalize to total-machine capacity.
@@ -264,6 +279,7 @@ class MultiServerManager:
                 "memory_percent": round(proc.memory_percent(), 1),
                 "memory_limit_mb": memory_limit_mb,
                 "memory_limit_percent": round(memory_mb / memory_limit_mb * 100, 1) if memory_limit_mb else 0.0,
+                "disk_read_bytes":disk_read_bytes,"disk_write_bytes":disk_write_bytes,
                 "available": available,
                 **disk,
             }

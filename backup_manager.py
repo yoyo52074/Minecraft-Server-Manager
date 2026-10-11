@@ -31,13 +31,18 @@ class BackupManager:
         os.makedirs(self.backup_directory, exist_ok=True)
         self.last_pre_restore_backup = None
 
-    def _included_files(self):
+    def _included_files(self, scope="all"):
+        allowed = {"all", "worlds", "plugins", "mods", "config"}
+        if scope not in allowed:
+            raise ValueError("不支援的備份範圍")
         files = []
-        for name in sorted(self.INCLUDED_FILES):
+        selected_files = self.INCLUDED_FILES if scope in {"all", "config"} else set()
+        selected_dirs = self.INCLUDED_DIRS if scope == "all" else ({"world", "world_nether", "world_the_end"} if scope == "worlds" else {scope} if scope in {"plugins", "mods", "config"} else set())
+        for name in sorted(selected_files):
             path = os.path.join(self.server_directory, name)
             if os.path.isfile(path):
                 files.append((path, name))
-        for directory in sorted(self.INCLUDED_DIRS):
+        for directory in sorted(selected_dirs):
             base = os.path.join(self.server_directory, directory)
             if not os.path.isdir(base):
                 continue
@@ -49,12 +54,12 @@ class BackupManager:
                         files.append((path, os.path.relpath(path, self.server_directory)))
         return files
 
-    def create_backup(self, label="manual", *, progress_callback=None, cancel_event=None):
+    def create_backup(self, label="manual", *, scope="all", progress_callback=None, cancel_event=None):
         timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S-%f")
         safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(label))[:64] or "backup"
         archive_path = os.path.join(self.backup_directory, f"backup-{timestamp}-{safe_label}.zip")
         part_path = archive_path + ".part"
-        files = self._included_files()
+        files = self._included_files(scope)
         total = len(files)
         try:
             with zipfile.ZipFile(part_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -123,6 +128,22 @@ class BackupManager:
                 removed.append(path)
         return removed
 
+    def cleanup_settings_retention(self, retain=50, max_age_days=180):
+        settings_dir = os.path.join(self.backup_directory, "settings")
+        if not os.path.isdir(settings_dir):
+            return []
+        retain = max(1, int(retain))
+        cutoff = time.time() - max(0, int(max_age_days)) * 86400 if max_age_days else None
+        snapshots = sorted((os.path.join(settings_dir, name) for name in os.listdir(settings_dir)
+                            if name.lower().endswith(".zip") and os.path.isfile(os.path.join(settings_dir, name))),
+                           key=os.path.getmtime, reverse=True)
+        removed = []
+        for index, path in enumerate(snapshots):
+            if index >= retain or (cutoff is not None and os.path.getmtime(path) < cutoff):
+                os.remove(path)
+                removed.append(path)
+        return removed
+
     @staticmethod
     def _validate_member(member):
         raw = member.filename.replace("\\", "/")
@@ -173,17 +194,27 @@ __all__ = ["BackupManager", "BackupCancelledError"]
 class BackupJobManager:
     """In-process background backup jobs with progress and cancellation."""
 
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         self._jobs = {}
         self._lock = threading.RLock()
 
-    def start(self, server_id, server_directory, label="manual", retain_count=10, max_age_days=0):
+    def _persist(self, job):
+        if self.db:
+            try:
+                self.db.save_backup_job(self._public(job))
+            except Exception:
+                pass
+
+    def start(self, server_id, server_directory, label="manual", retain_count=10, max_age_days=0, scope="all"):
+        if scope not in {"all", "worlds", "plugins", "mods", "config"}:
+            raise ValueError("不支援的備份範圍")
         job_id = uuid.uuid4().hex
         cancel_event = threading.Event()
         job = {"id": job_id, "server_id": server_id, "status": "queued", "completed": 0,
                "total": 0, "current_file": "", "filename": "", "error": "",
                "created_at": time.time(), "started_at": None, "finished_at": None,
-               "_cancel": cancel_event}
+               "scope": scope, "_cancel": cancel_event}
         with self._lock:
             cutoff = time.time() - 86400
             for old_id, old in list(self._jobs.items()):
@@ -193,29 +224,35 @@ class BackupJobManager:
             for old in finished[:-200]:
                 self._jobs.pop(old["id"], None)
             self._jobs[job_id] = job
-        threading.Thread(target=self._run, args=(job_id, server_directory, label, retain_count, max_age_days), daemon=True).start()
+        self._persist(job)
+        threading.Thread(target=self._run, args=(job_id, server_directory, label, retain_count, max_age_days, scope), daemon=True).start()
         return job_id
 
-    def _run(self, job_id, server_directory, label, retain_count, max_age_days):
+    def _run(self, job_id, server_directory, label, retain_count, max_age_days, scope):
         with self._lock:
             job = self._jobs[job_id]
             job["status"] = "running"
             job["started_at"] = time.time()
+            self._persist(job)
         manager = BackupManager(server_directory)
         def progress(done, total, filename):
             with self._lock:
                 job.update({"completed": done, "total": total, "current_file": filename})
+                self._persist(job)
         try:
-            path = manager.create_backup(label, progress_callback=progress, cancel_event=job["_cancel"])
+            path = manager.create_backup(label, scope=scope, progress_callback=progress, cancel_event=job["_cancel"])
             manager.cleanup_retention(retain_count, max_age_days or None)
             with self._lock:
                 job.update({"status": "completed", "filename": os.path.basename(path), "completed": job["total"], "finished_at": time.time()})
+                self._persist(job)
         except BackupCancelledError:
             with self._lock:
                 job.update({"status": "cancelled", "finished_at": time.time()})
+                self._persist(job)
         except Exception as exc:
             with self._lock:
                 job.update({"status": "failed", "error": str(exc), "finished_at": time.time()})
+                self._persist(job)
 
     @staticmethod
     def _public(job):
@@ -224,9 +261,9 @@ class BackupJobManager:
     def get(self, job_id, server_id=None):
         with self._lock:
             job = self._jobs.get(job_id)
-            if not job or (server_id is not None and job["server_id"] != server_id):
-                return None
-            return self._public(job)
+            if job and (server_id is None or job["server_id"] == server_id):
+                return self._public(job)
+        return self.db.backup_job(job_id, server_id) if self.db else None
 
     def cancel(self, job_id, server_id):
         with self._lock:
@@ -236,6 +273,7 @@ class BackupJobManager:
             if job["status"] in {"queued", "running"}:
                 job["_cancel"].set()
                 job["status"] = "cancelling"
+                self._persist(job)
             return self._public(job)
 
 
