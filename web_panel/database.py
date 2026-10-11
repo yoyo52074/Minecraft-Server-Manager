@@ -7,6 +7,7 @@ from pathlib import Path
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from .permissions import ALL_PERMISSIONS
 
 
 class WebDatabase:
@@ -49,6 +50,14 @@ class WebDatabase:
                     action TEXT NOT NULL,
                     detail TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS server_permissions (
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    server_id INTEGER NOT NULL,
+                    permission_key TEXT NOT NULL,
+                    allowed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, server_id, permission_key)
                 );
                 """
             )
@@ -162,3 +171,29 @@ class WebDatabase:
                 ORDER BY a.id DESC LIMIT ?
                 """, (limit,)
             ).fetchall()]
+
+    def get_server_permissions(self, user_id: int, server_id: int):
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT permission_key, allowed FROM server_permissions WHERE user_id = ? AND server_id = ?",
+                (user_id, server_id),
+            ).fetchall()
+        if rows:
+            return {row["permission_key"] for row in rows if row["allowed"]}
+        return set()
+
+    def has_server_permission(self, user: dict, server_id: int, permission_key: str) -> bool:
+        if user["role"] == "admin":
+            return True
+        return permission_key in self.get_server_permissions(user["user_id"], server_id)
+
+    def set_server_permissions(self, user_id: int, server_id: int, permissions):
+        selected = set(permissions) & set(ALL_PERMISSIONS)
+        now = self._now()
+        with self._connect() as db:
+            db.execute("DELETE FROM server_permissions WHERE user_id = ? AND server_id = ?", (user_id, server_id))
+            db.executemany(
+                "INSERT INTO server_permissions(user_id, server_id, permission_key, allowed, updated_at) VALUES (?, ?, ?, 1, ?)",
+                [(user_id, server_id, permission, now) for permission in selected],
+            )
+        return selected

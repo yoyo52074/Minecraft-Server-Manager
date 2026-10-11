@@ -38,6 +38,15 @@ class WebPanelServiceTests(unittest.TestCase):
         self.store.delete(profile["id"])
         self.assertIsNone(self.store.get(profile["id"]))
 
+    def test_server_permissions_default_deny_and_assign(self):
+        profile = self.store.create("Protected", Path(self.temp.name) / "protected", "Paper")
+        user_id = self.db.create_user("limited", "l" * 12, "viewer")
+        user = {"user_id": user_id, "role": "viewer"}
+        self.assertFalse(self.db.has_server_permission(user, profile["id"], "server.view"))
+        self.db.set_server_permissions(user_id, profile["id"], {"server.view", "files.view"})
+        self.assertTrue(self.db.has_server_permission(user, profile["id"], "server.view"))
+        self.assertFalse(self.db.has_server_permission(user, profile["id"], "server.stop"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import SafeFileService
 from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
+from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -39,6 +40,17 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=403, detail="權限不足")
         return user
 
+    def require_server_permission(request: Request, profile_id: int, permission: str):
+        user = require_user(request)
+        if not profiles.get(profile_id):
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        if not db.has_server_permission(user, profile_id, permission):
+            raise HTTPException(status_code=403, detail=f"缺少權限：{permission}")
+        return user
+
+    def visible_servers(user):
+        return [item for item in multi.statuses() if user["role"] == "admin" or db.has_server_permission(user, item["id"], "server.view")]
+
     def render(request, template, **context):
         context.update({"user": current_user(request), "setup_required": db.user_count() == 0})
         return templates.TemplateResponse(request=request, name=template, context=context)
@@ -53,15 +65,21 @@ def create_app(controller, database_path):
         user = current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=303)
-        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=multi.statuses())
+        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=visible_servers(user))
 
     @app.get("/server/{profile_id}", response_class=HTMLResponse)
     def server_page(profile_id: int, request: Request):
-        require_user(request)
+        require_server_permission(request, profile_id, "server.view")
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
         return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=current_user(request)["csrf_token"])
+
+    @app.get("/server/{profile_id}/settings", response_class=HTMLResponse)
+    def settings_page(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "settings.view")
+        profile = profiles.get(profile_id)
+        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"])
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
@@ -118,8 +136,8 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers")
     def list_servers(request: Request):
-        require_user(request)
-        return {"servers": multi.statuses(), "core_types": sorted(CORE_TYPES)}
+        user = require_user(request)
+        return {"servers": visible_servers(user), "core_types": sorted(CORE_TYPES)}
 
     @app.post("/api/servers")
     async def create_server(request: Request):
@@ -141,7 +159,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}")
     def get_server(profile_id: int, request: Request):
-        require_user(request)
+        require_server_permission(request, profile_id, "server.view")
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
@@ -175,25 +193,26 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/{action}")
     def server_action(profile_id: int, action: str, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        permission = {"start": "server.start", "stop": "server.stop", "force-stop": "server.force_stop"}.get(action)
+        if not permission:
+            raise HTTPException(status_code=404, detail="未知的操作")
+        user = require_server_permission(request, profile_id, permission)
         check_csrf(request, user)
         actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
-        if action not in actions:
-            raise HTTPException(status_code=404, detail="未知的操作")
         ok, message = actions[action](profile_id)
         db.audit(user["user_id"], f"server_{action}", str(profile_id))
         return {"ok": ok, "message": message}
 
     @app.get("/api/servers/{profile_id}/logs")
     def server_logs(profile_id: int, request: Request, limit: int = 200):
-        require_user(request)
+        require_server_permission(request, profile_id, "console.view")
         if not profiles.get(profile_id):
             raise HTTPException(status_code=404, detail="找不到伺服器")
         return {"logs": multi.logs(profile_id, limit)}
 
     @app.post("/api/servers/{profile_id}/console")
     async def server_console(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "console.send_command")
         check_csrf(request, user)
         payload = await request.json()
         ok, message = multi.send_command(profile_id, str(payload.get("command", "")))
@@ -202,7 +221,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/settings")
     def server_settings(profile_id: int, request: Request):
-        require_user(request)
+        require_server_permission(request, profile_id, "settings.view")
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
@@ -210,13 +229,20 @@ def create_app(controller, database_path):
 
     @app.put("/api/servers/{profile_id}/settings")
     async def update_server_settings(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "settings.edit")
         check_csrf(request, user)
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
         payload = await request.json()
         properties = payload.get("properties", payload)
+        profile_values = payload.get("profile", {})
+        if not isinstance(profile_values, dict):
+            raise HTTPException(status_code=400, detail="伺服器設定格式錯誤")
+        if any(key in profile_values for key in ("java_path", "min_memory", "max_memory")):
+            require_server_permission(request, profile_id, "settings.edit_java")
+        if any(key in profile_values for key in ("launcher", "auto_restart")):
+            require_server_permission(request, profile_id, "settings.edit_startup")
         if not isinstance(properties, dict):
             raise HTTPException(status_code=400, detail="設定格式錯誤")
         if "server-port" in properties:
@@ -228,6 +254,8 @@ def create_app(controller, database_path):
                 raise HTTPException(status_code=400, detail="伺服器連接埠必須介於 1 到 65535") from exc
         try:
             ServerManager(profile["directory"]).save_server_properties({str(k): str(v) for k, v in properties.items()})
+            if profile_values:
+                profiles.update(profile_id, profile_values)
         except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "update_settings", str(profile_id))
@@ -235,7 +263,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/backups")
     def list_backups(profile_id: int, request: Request):
-        require_user(request)
+        require_server_permission(request, profile_id, "backups.view")
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
@@ -244,7 +272,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/backups")
     async def create_backup(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "backups.create")
         check_csrf(request, user)
         profile = profiles.get(profile_id)
         if not profile:
@@ -259,7 +287,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/backups/restore")
     async def restore_backup(profile_id: int, request: Request):
-        user = require_user(request, {"admin"})
+        user = require_server_permission(request, profile_id, "backups.restore")
         check_csrf(request, user)
         profile = profiles.get(profile_id)
         if not profile:
@@ -281,7 +309,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/files")
     def list_files(profile_id: int, request: Request, path: str = ""):
-        require_user(request)
+        require_server_permission(request, profile_id, "files.view")
         try:
             return {"path": path, "items": files.list(profile_id, path)}
         except (PermissionError, FileNotFoundError, NotADirectoryError) as exc:
@@ -289,7 +317,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/files/download")
     def download_file(profile_id: int, request: Request, path: str):
-        require_user(request)
+        require_server_permission(request, profile_id, "files.download")
         try:
             target = files.resolve(profile_id, path)
         except (PermissionError, FileNotFoundError) as exc:
@@ -300,7 +328,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/files/upload")
     async def upload_file(profile_id: int, request: Request, file: UploadFile = File(...), path: str = Form("")):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "files.upload")
         check_csrf(request, user)
         relative = str(Path(path) / (file.filename or "upload.bin"))
         try:
@@ -312,7 +340,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/files/mkdir")
     async def make_directory(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "files.create_folder")
         check_csrf(request, user)
         payload = await request.json()
         try:
@@ -323,7 +351,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/files/rename")
     async def rename_file(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "files.rename")
         check_csrf(request, user)
         payload = await request.json()
         try:
@@ -334,7 +362,7 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/files/text")
     def read_text_file(profile_id: int, request: Request, path: str):
-        require_user(request)
+        require_server_permission(request, profile_id, "files.view")
         try:
             return {"path": path, "content": files.read_text(profile_id, path)}
         except (PermissionError, FileNotFoundError, ValueError, OSError) as exc:
@@ -342,7 +370,7 @@ def create_app(controller, database_path):
 
     @app.put("/api/servers/{profile_id}/files/text")
     async def write_text_file(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "files.edit")
         check_csrf(request, user)
         payload = await request.json()
         try:
@@ -354,7 +382,10 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/files/{operation}")
     async def file_operation(profile_id: int, operation: str, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        permission = {"copy": "files.copy", "move": "files.move", "zip": "files.compress", "unzip": "files.extract"}.get(operation)
+        if not permission:
+            raise HTTPException(status_code=404, detail="未知的檔案操作")
+        user = require_server_permission(request, profile_id, permission)
         check_csrf(request, user)
         payload = await request.json()
         try:
@@ -373,7 +404,7 @@ def create_app(controller, database_path):
 
     @app.delete("/api/servers/{profile_id}/files")
     async def delete_file(profile_id: int, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, profile_id, "files.delete")
         check_csrf(request, user)
         payload = await request.json()
         try:
@@ -385,18 +416,19 @@ def create_app(controller, database_path):
 
     @app.post("/api/server/{action}")
     def legacy_server_action(action: str, request: Request):
-        user = require_user(request, {"admin", "operator"})
+        permission = {"start": "server.start", "stop": "server.stop", "restart": "server.restart"}.get(action)
+        if not permission:
+            raise HTTPException(status_code=404, detail="未知的操作")
+        user = require_server_permission(request, legacy_profile["id"], permission)
         check_csrf(request, user)
         actions = {"start": app.state.bridge.start, "stop": app.state.bridge.stop, "restart": app.state.bridge.restart}
-        if action not in actions:
-            raise HTTPException(status_code=404, detail="未知的操作")
         ok, message = actions[action]()
         db.audit(user["user_id"], action, message)
         return {"ok": ok, "message": message}
 
     @app.post("/api/console")
     async def legacy_console(request: Request):
-        user = require_user(request, {"admin", "operator"})
+        user = require_server_permission(request, legacy_profile["id"], "console.send_command")
         check_csrf(request, user)
         payload = await request.json()
         ok, message = app.state.bridge.send_command(str(payload.get("command", "")))
@@ -419,6 +451,30 @@ def create_app(controller, database_path):
         except Exception as exc:
             return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=str(exc))
         return RedirectResponse("/admin/users", status_code=303)
+
+    @app.get("/admin/users/{user_id}/permissions", response_class=HTMLResponse)
+    def permissions_page(user_id: int, request: Request):
+        admin = require_user(request, {"admin"})
+        matches = [item for item in db.list_users() if item["id"] == user_id]
+        if not matches:
+            raise HTTPException(status_code=404, detail="找不到使用者")
+        server_rows = [{"profile": profile, "selected": db.get_server_permissions(user_id, profile["id"])} for profile in profiles.list()]
+        return render(request, "permissions.html", managed_user=matches[0], servers=server_rows, groups=PERMISSION_GROUPS, csrf=admin["csrf_token"])
+
+    @app.post("/admin/users/{user_id}/permissions")
+    async def save_permissions(user_id: int, request: Request):
+        admin = require_user(request, {"admin"})
+        form = await request.form()
+        if form.get("csrf") != admin["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
+        try:
+            server_id = int(form.get("server_id"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="伺服器選擇錯誤") from exc
+        selected = form.getlist("permissions")
+        db.set_server_permissions(user_id, server_id, selected)
+        db.audit(admin["user_id"], "set_server_permissions", f"user={user_id},server={server_id},count={len(selected)}")
+        return RedirectResponse(f"/admin/users/{user_id}/permissions?server_id={server_id}", status_code=303)
 
     @app.post("/admin/users/{user_id}/toggle")
     def toggle_user(user_id: int, request: Request, csrf: str = Form(...)):
@@ -461,7 +517,7 @@ def create_app(controller, database_path):
         await websocket.accept()
         try:
             while True:
-                snapshot = multi.statuses()
+                snapshot = visible_servers(session)
                 await websocket.send_json({"type": "servers", "servers": snapshot, "timestamp": asyncio.get_running_loop().time()})
                 try:
                     await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
