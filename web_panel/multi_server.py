@@ -178,6 +178,7 @@ class MultiServerManager:
         self._processes = {}
         self._logs = {}
         self._started_at = {}
+        self._phases = {}
 
     def _is_legacy(self, profile):
         return self.legacy_bridge and str(Path(profile["directory"]).resolve()) == str(Path(self.legacy_bridge.controller.server_directory).resolve())
@@ -188,7 +189,7 @@ class MultiServerManager:
             return None
         if self._is_legacy(profile):
             result = self.legacy_bridge.status()
-            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100)})
+            result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": "running" if result.get("running") else "stopped"})
             result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process)
             return result
         process = self._processes.get(profile_id)
@@ -196,28 +197,40 @@ class MultiServerManager:
         if not running:
             self._processes.pop(profile_id, None)
             self._started_at.pop(profile_id, None)
+            if self._phases.get(profile_id) not in {"error", "stopped"}:
+                self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],
             "running": running,
+            "phase": self._phases.get(profile_id, "running" if running else "stopped"),
             "uptime_seconds": int(time.time() - self._started_at[profile_id]) if running and profile_id in self._started_at else 0,
             "logs": self._logs.get(profile_id, [])[-100:],
-            "metrics": self._metrics(process),
+            "metrics": self._metrics(process, profile["directory"]),
         }
 
     @staticmethod
-    def _metrics(process):
+    def _metrics(process, directory=None):
+        disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0}
+        if psutil is not None:
+            try:
+                usage = psutil.disk_usage(str(directory or Path.cwd()))
+                net = psutil.net_io_counters()
+                disk = {"disk_used_percent": round(usage.percent, 1), "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 2), "net_sent_mb": round(net.bytes_sent / 1024 / 1024, 1), "net_recv_mb": round(net.bytes_recv / 1024 / 1024, 1)}
+            except (psutil.Error, OSError):
+                pass
         if not process or process.poll() is not None or psutil is None:
-            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0}
+            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
         try:
             proc = psutil.Process(process.pid)
             return {
                 "cpu_percent": round(proc.cpu_percent(interval=None), 1),
                 "memory_mb": round(proc.memory_info().rss / 1024 / 1024, 1),
                 "memory_percent": round(proc.memory_percent(), 1),
+                **disk,
             }
         except (psutil.Error, OSError):
-            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0}
+            return {"cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
 
     def statuses(self):
         return [self.status(item["id"]) for item in self.store.list()]
@@ -252,6 +265,7 @@ class MultiServerManager:
             )
             self._processes[profile_id] = process
             self._started_at[profile_id] = time.time()
+            self._phases[profile_id] = "running"
             self._logs.setdefault(profile_id, []).append("---------- 伺服器正在啟動 ----------")
             threading.Thread(target=self._read_output, args=(profile_id, process), daemon=True).start()
             return True, "已送出啟動要求"
@@ -264,6 +278,7 @@ class MultiServerManager:
                     self._logs[profile_id] = self._logs[profile_id][-500:]
         finally:
             self._logs.setdefault(profile_id, []).append("伺服器程序已停止")
+            self._phases[profile_id] = "error" if process.returncode not in (None, 0) else "stopped"
 
     def stop(self, profile_id, force=False):
         profile = self.store.get(profile_id)
@@ -274,6 +289,7 @@ class MultiServerManager:
         process = self._processes.get(profile_id)
         if not process or process.poll() is not None:
             return False, "伺服器目前沒有運行"
+        self._phases[profile_id] = "stopping"
         try:
             if force:
                 process.kill()

@@ -332,6 +332,45 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "path": target.name}
 
+    @app.get("/api/servers/{profile_id}/files/text")
+    def read_text_file(profile_id: int, request: Request, path: str):
+        require_user(request)
+        try:
+            return {"path": path, "content": files.read_text(profile_id, path)}
+        except (PermissionError, FileNotFoundError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/servers/{profile_id}/files/text")
+    async def write_text_file(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            files.write_text(profile_id, payload.get("path", ""), str(payload.get("content", "")))
+        except (PermissionError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "edit_file", f"{profile_id}:{payload.get('path', '')}")
+        return {"ok": True}
+
+    @app.post("/api/servers/{profile_id}/files/{operation}")
+    async def file_operation(profile_id: int, operation: str, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            if operation in {"copy", "move"}:
+                target = files.copy_or_move(profile_id, payload.get("source", ""), payload.get("destination", ""), operation == "move")
+            elif operation == "zip":
+                target = files.zip_folder(profile_id, payload.get("source", ""), payload.get("destination", "archive.zip"))
+            elif operation == "unzip":
+                target = files.unzip(profile_id, payload.get("source", ""), payload.get("destination", ""))
+            else:
+                raise ValueError("未知的檔案操作")
+        except (PermissionError, ValueError, FileNotFoundError, NotADirectoryError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], f"file_{operation}", f"{profile_id}:{payload}")
+        return {"ok": True, "path": str(target)}
+
     @app.delete("/api/servers/{profile_id}/files")
     async def delete_file(profile_id: int, request: Request):
         user = require_user(request, {"admin", "operator"})
@@ -421,13 +460,9 @@ def create_app(controller, database_path):
             return
         await websocket.accept()
         try:
-            previous = None
             while True:
                 snapshot = multi.statuses()
-                compact = repr(snapshot)
-                if compact != previous:
-                    await websocket.send_json({"type": "servers", "servers": snapshot})
-                    previous = compact
+                await websocket.send_json({"type": "servers", "servers": snapshot, "timestamp": asyncio.get_running_loop().time()})
                 try:
                     await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 except asyncio.TimeoutError:
