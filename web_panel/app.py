@@ -1,11 +1,12 @@
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .database import WebDatabase
-
+from .file_service import SafeFileService
+from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -14,12 +15,18 @@ def create_app(controller, database_path):
     app = FastAPI(title="Minecraft Server Manager Web Panel")
     db = WebDatabase(database_path)
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+    profiles = ServerProfileStore(db)
+    legacy_profile = profiles.ensure_legacy(controller.server_directory)
+    multi = MultiServerManager(profiles, controller.web_bridge)
+    files = SafeFileService(profiles)
     app.state.db = db
     app.state.bridge = controller.web_bridge
+    app.state.profiles = profiles
+    app.state.multi = multi
+    app.state.files = files
 
     def current_user(request: Request):
-        session = db.get_session(request.cookies.get("mcm_session"))
-        return session
+        return db.get_session(request.cookies.get("mcm_session"))
 
     def require_user(request: Request, roles=None):
         user = current_user(request)
@@ -33,12 +40,25 @@ def create_app(controller, database_path):
         context.update({"user": current_user(request), "setup_required": db.user_count() == 0})
         return templates.TemplateResponse(request=request, name=template, context=context)
 
+    def check_csrf(request: Request, user):
+        token = request.headers.get("x-csrf-token") or request.cookies.get("mcm_csrf")
+        if not token or token != user["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         user = current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=303)
-        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs())
+        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=multi.statuses())
+
+    @app.get("/server/{profile_id}", response_class=HTMLResponse)
+    def server_page(profile_id: int, request: Request):
+        require_user(request)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=current_user(request)["csrf_token"])
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
@@ -83,11 +103,6 @@ def create_app(controller, database_path):
         response.delete_cookie("mcm_csrf")
         return response
 
-    def check_csrf(request: Request, user):
-        token = request.headers.get("x-csrf-token") or request.cookies.get("mcm_csrf")
-        if not token or token != user["csrf_token"]:
-            raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
-
     @app.get("/api/status")
     def api_status(request: Request):
         require_user(request)
@@ -98,8 +113,157 @@ def create_app(controller, database_path):
         require_user(request)
         return {"logs": app.state.bridge.logs(limit)}
 
+    @app.get("/api/servers")
+    def list_servers(request: Request):
+        require_user(request)
+        return {"servers": multi.statuses(), "core_types": sorted(CORE_TYPES)}
+
+    @app.post("/api/servers")
+    async def create_server(request: Request):
+        user = require_user(request, {"admin"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            profile = profiles.create(
+                payload.get("name", ""), payload.get("directory", ""), payload.get("core_type", "Paper"),
+                minecraft_version=payload.get("minecraft_version", ""), java_path=payload.get("java_path", "java"),
+                min_memory=payload.get("min_memory", 1024), max_memory=payload.get("max_memory", 2048),
+                server_port=payload.get("server_port", 25565), launcher=payload.get("launcher", ""),
+                auto_restart=payload.get("auto_restart", False),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "create_server", str(profile["id"]))
+        return profile
+
+    @app.get("/api/servers/{profile_id}")
+    def get_server(profile_id: int, request: Request):
+        require_user(request)
+        profile = profiles.get(profile_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        profile["status"] = multi.status(profile_id)
+        return profile
+
+    @app.patch("/api/servers/{profile_id}")
+    async def update_server(profile_id: int, request: Request):
+        user = require_user(request, {"admin"})
+        check_csrf(request, user)
+        try:
+            profile = profiles.update(profile_id, await request.json())
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "update_server", str(profile_id))
+        return profile
+
+    @app.delete("/api/servers/{profile_id}")
+    async def delete_server(profile_id: int, request: Request):
+        user = require_user(request, {"admin"})
+        check_csrf(request, user)
+        if multi.status(profile_id) and multi.status(profile_id)["running"]:
+            raise HTTPException(status_code=409, detail="請先停止伺服器")
+        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        try:
+            profiles.delete(profile_id, bool(payload.get("delete_files", False)))
+        except (ValueError, KeyError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "delete_server", str(profile_id))
+        return {"ok": True}
+
+    @app.post("/api/servers/{profile_id}/{action}")
+    def server_action(profile_id: int, action: str, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
+        if action not in actions:
+            raise HTTPException(status_code=404, detail="未知的操作")
+        ok, message = actions[action](profile_id)
+        db.audit(user["user_id"], f"server_{action}", str(profile_id))
+        return {"ok": ok, "message": message}
+
+    @app.get("/api/servers/{profile_id}/logs")
+    def server_logs(profile_id: int, request: Request, limit: int = 200):
+        require_user(request)
+        if not profiles.get(profile_id):
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        return {"logs": multi.logs(profile_id, limit)}
+
+    @app.post("/api/servers/{profile_id}/console")
+    async def server_console(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        ok, message = multi.send_command(profile_id, str(payload.get("command", "")))
+        db.audit(user["user_id"], "console_command", f"{profile_id}: {payload.get('command', '')}")
+        return {"ok": ok, "message": message}
+
+    @app.get("/api/servers/{profile_id}/files")
+    def list_files(profile_id: int, request: Request, path: str = ""):
+        require_user(request)
+        try:
+            return {"path": path, "items": files.list(profile_id, path)}
+        except (PermissionError, FileNotFoundError, NotADirectoryError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/servers/{profile_id}/files/download")
+    def download_file(profile_id: int, request: Request, path: str):
+        require_user(request)
+        try:
+            target = files.resolve(profile_id, path)
+        except (PermissionError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail="不是檔案")
+        return FileResponse(target, filename=target.name)
+
+    @app.post("/api/servers/{profile_id}/files/upload")
+    async def upload_file(profile_id: int, request: Request, file: UploadFile = File(...), path: str = Form("")):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        relative = str(Path(path) / (file.filename or "upload.bin"))
+        try:
+            target = files.write_upload(profile_id, relative, file)
+        except (PermissionError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "upload_file", f"{profile_id}:{relative}")
+        return {"ok": True, "path": target.name}
+
+    @app.post("/api/servers/{profile_id}/files/mkdir")
+    async def make_directory(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            files.mkdir(profile_id, payload.get("path", ""))
+        except (PermissionError, FileExistsError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/servers/{profile_id}/files/rename")
+    async def rename_file(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            target = files.rename(profile_id, payload.get("path", ""), payload.get("new_name", ""))
+        except (PermissionError, ValueError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "path": target.name}
+
+    @app.delete("/api/servers/{profile_id}/files")
+    async def delete_file(profile_id: int, request: Request):
+        user = require_user(request, {"admin", "operator"})
+        check_csrf(request, user)
+        payload = await request.json()
+        try:
+            files.delete(profile_id, payload.get("path", ""))
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "delete_file", f"{profile_id}:{payload.get('path', '')}")
+        return {"ok": True}
+
     @app.post("/api/server/{action}")
-    def api_server_action(action: str, request: Request):
+    def legacy_server_action(action: str, request: Request):
         user = require_user(request, {"admin", "operator"})
         check_csrf(request, user)
         actions = {"start": app.state.bridge.start, "stop": app.state.bridge.stop, "restart": app.state.bridge.restart}
@@ -110,7 +274,7 @@ def create_app(controller, database_path):
         return {"ok": ok, "message": message}
 
     @app.post("/api/console")
-    async def api_console(request: Request):
+    async def legacy_console(request: Request):
         user = require_user(request, {"admin", "operator"})
         check_csrf(request, user)
         payload = await request.json()
@@ -131,7 +295,7 @@ def create_app(controller, database_path):
         try:
             new_id = db.create_user(username, password, role)
             db.audit(user["user_id"], "create_user", username)
-        except (ValueError, Exception) as exc:
+        except Exception as exc:
             return render(request, "admin_users.html", users=db.list_users(), csrf=user["csrf_token"], error=str(exc))
         return RedirectResponse("/admin/users", status_code=303)
 

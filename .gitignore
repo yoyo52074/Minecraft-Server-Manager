@@ -1,1 +1,4 @@
 __pycache__/
+artifacts/
+web_panel.db
+web_panel_startup.log
