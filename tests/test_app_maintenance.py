@@ -62,6 +62,9 @@ class MaintenanceApiTests(unittest.TestCase):
         for path in (f"/server/{self.profile_id}/history", f"/server/{self.profile_id}/monitor", f"/server/{self.profile_id}/backups"):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, (path, response.text[:500]))
+            if path.endswith("/monitor"):
+                self.assertIn("max-width:100%", response.text)
+                self.assertIn('class="monitor-chart"', response.text)
 
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
