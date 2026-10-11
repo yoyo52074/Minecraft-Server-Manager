@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -67,8 +68,12 @@ class WebDatabase:
                     cpu_percent REAL NOT NULL,
                     memory_mb REAL NOT NULL,
                     memory_percent REAL NOT NULL,
+                    memory_limit_percent REAL NOT NULL DEFAULT 0,
+                    memory_limit_mb REAL NOT NULL DEFAULT 0,
                     disk_used_percent REAL NOT NULL,
                     disk_free_gb REAL NOT NULL,
+                    disk_used_gb REAL NOT NULL DEFAULT 0,
+                    disk_total_gb REAL NOT NULL DEFAULT 0,
                     net_sent_mb REAL NOT NULL,
                     net_recv_mb REAL NOT NULL
                 );
@@ -94,11 +99,24 @@ class WebDatabase:
                     max_age_days INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS system_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(audit_logs)")}
             if "server_id" not in columns:
                 db.execute("ALTER TABLE audit_logs ADD COLUMN server_id INTEGER")
+            metric_columns = {row[1] for row in db.execute("PRAGMA table_info(resource_metrics)")}
+            for name in ("memory_limit_percent", "memory_limit_mb", "disk_used_gb", "disk_total_gb"):
+                if name not in metric_columns:
+                    db.execute(f"ALTER TABLE resource_metrics ADD COLUMN {name} REAL NOT NULL DEFAULT 0")
+            normalized = db.execute("SELECT value FROM system_metadata WHERE key='cpu_percent_machine_normalized'").fetchone()
+            if not normalized:
+                cpu_count = max(1, os.cpu_count() or 1)
+                db.execute("UPDATE resource_metrics SET cpu_percent=MIN(cpu_percent / ?, 100)", (cpu_count,))
+                db.execute("INSERT INTO system_metadata(key,value) VALUES('cpu_percent_machine_normalized','1')")
 
     @staticmethod
     def _now():
@@ -247,9 +265,10 @@ class WebDatabase:
 
     def evaluate_metric_alerts(self, server_id, metrics):
         thresholds = self.alert_thresholds(server_id)
+        memory_load = float(metrics.get("memory_limit_percent") or metrics.get("memory_percent", 0))
         checks = {
             "cpu": ("CPU", float(metrics.get("cpu_percent", 0)), thresholds["cpu_percent"], "%"),
-            "memory": ("記憶體使用率", float(metrics.get("memory_percent", 0)), thresholds["memory_percent"], "%"),
+            "memory": ("記憶體配置上限使用率", memory_load, thresholds["memory_percent"], "%"),
             "disk": ("磁碟使用率", float(metrics.get("disk_used_percent", 0)), thresholds["disk_used_percent"], "%"),
         }
         now = __import__("time").time()
@@ -324,7 +343,7 @@ class WebDatabase:
 
     def record_metrics(self, server_id: int, metrics: dict):
         with self._connect() as db:
-            db.execute("INSERT INTO resource_metrics(server_id,recorded_at,cpu_percent,memory_mb,memory_percent,disk_used_percent,disk_free_gb,net_sent_mb,net_recv_mb) VALUES(?,?,?,?,?,?,?,?,?)", (server_id, __import__('time').time(), metrics.get('cpu_percent',0), metrics.get('memory_mb',0), metrics.get('memory_percent',0), metrics.get('disk_used_percent',0), metrics.get('disk_free_gb',0), metrics.get('net_sent_mb',0), metrics.get('net_recv_mb',0)))
+            db.execute("INSERT INTO resource_metrics(server_id,recorded_at,cpu_percent,memory_mb,memory_percent,memory_limit_percent,memory_limit_mb,disk_used_percent,disk_free_gb,disk_used_gb,disk_total_gb,net_sent_mb,net_recv_mb) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (server_id, __import__('time').time(), metrics.get('cpu_percent',0), metrics.get('memory_mb',0), metrics.get('memory_percent',0), metrics.get('memory_limit_percent',0), metrics.get('memory_limit_mb',0), metrics.get('disk_used_percent',0), metrics.get('disk_free_gb',0), metrics.get('disk_used_gb',0), metrics.get('disk_total_gb',0), metrics.get('net_sent_mb',0), metrics.get('net_recv_mb',0)))
             db.execute("DELETE FROM resource_metrics WHERE recorded_at < ?", (__import__('time').time()-86400,))
 
     def recent_metrics(self, server_id: int, limit=120):

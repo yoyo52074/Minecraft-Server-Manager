@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% block title %}{{ profile.name }}｜監控與告警{% endblock %}
+{% block content %}
+<main class="wrap">
+<style>
+.monitor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px;align-items:stretch}
+.monitor-card{min-width:0;overflow:hidden;padding:20px}
+.monitor-card h2{margin:0 0 14px;font-size:20px}
+.monitor-value{font-size:clamp(25px,3vw,36px);line-height:1.15;font-weight:750;letter-spacing:-.02em;overflow-wrap:anywhere}
+.monitor-unit{font-size:15px;font-weight:600;color:var(--muted);letter-spacing:0}
+.monitor-sub{min-height:40px;margin:8px 0 10px;color:var(--muted);font-size:13px;line-height:1.6}
+.monitor-percent{color:var(--text);font-weight:700}
+.monitor-chart{display:block;width:100%;max-width:100%;height:auto;aspect-ratio:700 / 180;box-sizing:border-box;background:#151a23;border-radius:8px}
+.chart-caption{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:7px}
+@media(max-width:640px){.monitor-card{padding:16px}.monitor-sub{min-height:0}}
+</style>
+<p><a href="/server/{{ profile.id }}">← 返回伺服器</a></p>
+<h1>{{ profile.name }}｜監控與告警</h1>
+<p class="muted">CPU 為伺服器程序占整台主機總運算能力；記憶體同時列出伺服器配置上限與整機 RAM 占比；磁碟是伺服器資料夾所在磁碟區。</p>
+<section class="monitor-grid">
+  <article class="card monitor-card">
+    <h2>CPU</h2>
+    <div class="monitor-value"><span id="cpu-current">{{ current.get('cpu_percent', 0) }}</span><span class="monitor-unit"> %</span></div>
+    <p class="monitor-sub">伺服器程序 · 整機總 CPU 使用率（依所有邏輯核心正規化，0–100%）</p>
+    <canvas class="monitor-chart" id="cpu-chart" width="700" height="180" aria-label="CPU 使用率歷史圖表"></canvas>
+    <div class="chart-caption"><span>0%</span><span>歷史記錄</span><span>100%</span></div>
+  </article>
+  <article class="card monitor-card">
+    <h2>記憶體</h2>
+    <div class="monitor-value"><span id="memory-mb">{{ current.get('memory_mb', 0) }}</span><span class="monitor-unit"> MB</span></div>
+    <p class="monitor-sub"><span class="monitor-percent" id="memory-limit-percent">{{ current.get('memory_limit_percent', 0) }}</span>% 相對配置上限 · 上限 <span id="memory-limit-mb">{{ current.get('memory_limit_mb', profile.max_memory) }}</span> MB<br>占整機實體 RAM：<span id="memory-system-percent">{{ current.get('memory_percent', 0) }}</span>%</p>
+    <p class="small muted">比例以程序 RSS ÷ 設定最大記憶體計算；RSS 含 JVM 原生開銷，可能超過 100%，不等同 Java Heap 精確用量。</p>
+    <canvas class="monitor-chart" id="memory-chart" width="700" height="180" aria-label="配置記憶體上限使用率歷史圖表"></canvas>
+    <div class="chart-caption"><span>0%</span><span>相對伺服器配置上限</span><span>100%</span></div>
+  </article>
+  <article class="card monitor-card">
+    <h2>磁碟</h2>
+    <div class="monitor-value"><span id="disk-percent">{{ current.get('disk_used_percent', 0) }}</span><span class="monitor-unit"> %</span></div>
+    <p class="monitor-sub">已用 <span id="disk-used">{{ current.get('disk_used_gb', 0) }}</span> GB ／ 總量 <span id="disk-total">{{ current.get('disk_total_gb', 0) }}</span> GB<br>剩餘 <span id="disk-free">{{ current.get('disk_free_gb', 0) }}</span> GB · 伺服器資料夾所在磁碟區使用率</p>
+    <canvas class="monitor-chart" id="disk-chart" width="700" height="180" aria-label="磁碟使用率歷史圖表"></canvas>
+    <div class="chart-caption"><span>0%</span><span>所在磁碟區使用率</span><span>100%</span></div>
+  </article>
+</section>
+<section class="card" style="margin-top:16px"><h2>告警門檻</h2><p class="muted">達到門檻時建立告警；低於門檻後自動解除。CPU、配置記憶體上限與磁碟門檻預設均為 90%。</p>
+{% if can_edit_alerts %}<div class="grid"><label>CPU 整機使用率門檻 %<input id="cpu_threshold" type="number" min="1" max="100" step="0.5" value="{{ thresholds.cpu_percent }}"></label><label>伺服器記憶體配置上限門檻 %<input id="memory_threshold" type="number" min="1" max="100" step="0.5" value="{{ thresholds.memory_percent }}"></label><label>所在磁碟區使用率門檻 %<input id="disk_threshold" type="number" min="1" max="100" step="0.5" value="{{ thresholds.disk_used_percent }}"></label></div><button id="save">儲存告警門檻</button>{% else %}<p class="muted">只有具備設定編輯權限的使用者可修改告警門檻。</p>{% endif %}
+<p id="message" class="muted" aria-live="polite"></p><h2>最近告警</h2><table class="table"><thead><tr><th>發生時間</th><th>告警內容</th><th>狀態</th><th>解除時間</th></tr></thead><tbody id="alerts"></tbody></table></section>
+<section class="card" style="margin-top:16px"><h2>最近監控採樣</h2><div style="overflow-x:auto"><table class="table"><thead><tr><th>時間</th><th>CPU／整機</th><th>記憶體／配置上限</th><th>記憶體／整機 RAM</th><th>磁碟使用</th><th>磁碟剩餘</th></tr></thead><tbody id="samples"></tbody></table></div></section>
+</main>
+<script>
+const id={{ profile.id }},csrf={{ csrf|tojson }};let samples=[];
+const colors={cpu:'#27c4e8',memory:'#7c9cff',disk:'#f0ad4e'};
+function number(v,d=1){const n=Number(v);return Number.isFinite(n)?n.toFixed(d):'0.0'}
+function memoryLimitPct(x){return x.memory_limit_percent!==undefined&&x.memory_limit_percent!==null?Number(x.memory_limit_percent)||0:Number(x.memory_percent)||0}
+function draw(canvasId,key){const c=document.getElementById(canvasId),ctx=c.getContext('2d'),w=c.width,h=c.height;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#303b48';ctx.lineWidth=1;for(const pct of [0,50,100]){const y=h-10-pct*(h-20)/100;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}const vals=samples.map(x=>Number(key==='cpu'?x.cpu_percent:key==='memory'?memoryLimitPct(x):x.disk_used_percent)||0);if(!vals.length)return;ctx.beginPath();vals.forEach((value,index)=>{const x=index*w/Math.max(1,vals.length-1),y=h-10-Math.max(0,Math.min(100,value))*(h-20)/100;index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle=colors[key];ctx.lineWidth=3;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke()}
+function cell(row,value){const td=document.createElement('td');td.textContent=value??'—';row.appendChild(td);return td}
+function stamp(value){return new Date(Number(value)*1000).toLocaleString()}
+function render(data){samples=data.metrics||[];for(const [canvas,key] of [['cpu-chart','cpu'],['memory-chart','memory'],['disk-chart','disk']])draw(canvas,key);const latest=samples.at(-1);if(latest){document.getElementById('cpu-current').textContent=number(latest.cpu_percent);document.getElementById('memory-mb').textContent=number(latest.memory_mb);document.getElementById('memory-limit-percent').textContent=number(memoryLimitPct(latest));document.getElementById('memory-limit-mb').textContent=number(latest.memory_limit_mb||{{ profile.max_memory }},0);document.getElementById('memory-system-percent').textContent=number(latest.memory_percent);document.getElementById('disk-percent').textContent=number(latest.disk_used_percent);document.getElementById('disk-used').textContent=number(latest.disk_used_gb);document.getElementById('disk-total').textContent=number(latest.disk_total_gb);document.getElementById('disk-free').textContent=number(latest.disk_free_gb)}const body=document.getElementById('samples');body.replaceChildren();for(const x of samples.slice().reverse()){const tr=document.createElement('tr');cell(tr,stamp(x.recorded_at));cell(tr,`${number(x.cpu_percent)}%`);cell(tr,`${number(x.memory_mb)} / ${number(x.memory_limit_mb,0)} MB (${number(memoryLimitPct(x))}%)`);cell(tr,`${number(x.memory_percent)}% RAM`);cell(tr,`${number(x.disk_used_gb)} / ${number(x.disk_total_gb)} GB (${number(x.disk_used_percent)}%)`);cell(tr,`${number(x.disk_free_gb)} GB`);body.appendChild(tr)}if(!body.children.length){const tr=document.createElement('tr');cell(tr,'等待第一筆背景監控資料…').colSpan=6;body.appendChild(tr)}const alerts=document.getElementById('alerts');alerts.replaceChildren();for(const a of data.alerts||[]){const tr=document.createElement('tr');cell(tr,stamp(a.created_at));cell(tr,a.message);cell(tr,a.active?'作用中':'已解除');cell(tr,a.resolved_at?stamp(a.resolved_at):'—');alerts.appendChild(tr)}if(!alerts.children.length){const tr=document.createElement('tr');cell(tr,'目前沒有告警').colSpan=4;alerts.appendChild(tr)}}
+async function refresh(){const [m,a]=await Promise.all([fetch(`/api/servers/${id}/metrics?limit=120`),fetch(`/api/servers/${id}/alerts`)]);render({metrics:(await m.json()).metrics,alerts:(await a.json()).alerts})}
+const save=document.getElementById('save');if(save)save.onclick=async()=>{const r=await fetch(`/api/servers/${id}/alerts`,{method:'PUT',headers:{'content-type':'application/json','x-csrf-token':csrf},body:JSON.stringify({cpu_percent:Number(document.getElementById('cpu_threshold').value),memory_percent:Number(document.getElementById('memory_threshold').value),disk_used_percent:Number(document.getElementById('disk_threshold').value)})}),d=await r.json();document.getElementById('message').textContent=r.ok?'告警門檻已儲存':(d.detail||'儲存失敗')};refresh();setInterval(refresh,10000);
+</script>
+{% endblock %}

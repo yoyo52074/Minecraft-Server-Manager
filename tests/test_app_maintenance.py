@@ -65,6 +65,9 @@ class MaintenanceApiTests(unittest.TestCase):
             if path.endswith("/monitor"):
                 self.assertIn("max-width:100%", response.text)
                 self.assertIn('class="monitor-chart"', response.text)
+                self.assertIn("伺服器配置上限", response.text)
+                self.assertIn("disk-used", response.text)
+                self.assertIn("整機總 CPU", response.text)
 
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}

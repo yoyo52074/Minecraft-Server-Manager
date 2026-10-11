@@ -2,11 +2,14 @@ import os
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import zipfile
 
 from backup_manager import BackupCancelledError, BackupManager
 from web_panel.database import WebDatabase
 from web_panel.operations import MonitorService
+from web_panel.multi_server import MultiServerManager
 
 
 class BackupMaintenanceTests(unittest.TestCase):
@@ -117,6 +120,34 @@ class HistoryAndAlertTests(unittest.TestCase):
             self.assertTrue(any(event["alert_key"] == "cpu" for event in self.db.alert_events(42)))
         finally:
             monitor.stop()
+
+    def test_metric_percentages_have_explicit_denominators(self):
+        process = SimpleNamespace(pid=123, poll=lambda: None)
+        proc = SimpleNamespace(cpu_percent=lambda interval=None: 200.0,
+                               memory_info=lambda: SimpleNamespace(rss=1024 * 1024 * 1024),
+                               memory_percent=lambda: 4.0)
+        with patch("web_panel.multi_server.psutil") as fake_psutil:
+            fake_psutil.cpu_count.return_value = 8
+            fake_psutil.Process.return_value = proc
+            fake_psutil.disk_usage.return_value = SimpleNamespace(percent=65.0, free=350 * 1024**3,
+                                                                   used=650 * 1024**3, total=1000 * 1024**3)
+            fake_psutil.net_io_counters.return_value = SimpleNamespace(bytes_sent=0, bytes_recv=0)
+            metrics = MultiServerManager._metrics(process, "/server", memory_limit_mb=2048)
+        self.assertEqual(metrics["cpu_percent"], 25.0)
+        self.assertEqual(metrics["memory_mb"], 1024.0)
+        self.assertEqual(metrics["memory_percent"], 4.0)
+        self.assertEqual(metrics["memory_limit_percent"], 50.0)
+        self.assertEqual(metrics["disk_used_percent"], 65.0)
+        self.assertEqual(metrics["disk_used_gb"], 650.0)
+        self.assertEqual(metrics["disk_total_gb"], 1000.0)
+
+    def test_memory_alert_uses_server_allocation_ratio(self):
+        self.db.evaluate_metric_alerts(55, {"cpu_percent": 1, "memory_percent": 7.2,
+                                             "memory_limit_percent": 95, "disk_used_percent": 10})
+        events = self.db.alert_events(55)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["alert_key"], "memory")
+        self.assertIn("配置上限", events[0]["message"])
 
 
 if __name__ == "__main__":

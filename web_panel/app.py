@@ -104,7 +104,9 @@ def create_app(controller, database_path):
     @app.get("/server/{profile_id}/monitor", response_class=HTMLResponse)
     def monitor_page(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "resources.view")
-        return render(request, "monitor.html", profile=profiles.get(profile_id), csrf=user["csrf_token"], thresholds=db.alert_thresholds(profile_id), metrics=db.recent_metrics(profile_id, 120), alerts=db.alert_events(profile_id), can_edit_alerts=db.has_server_permission(user, profile_id, "settings.edit"))
+        profile = profiles.get(profile_id)
+        status = multi.status(profile_id) or {}
+        return render(request, "monitor_v2.html", profile=profile, csrf=user["csrf_token"], thresholds=db.alert_thresholds(profile_id), metrics=db.recent_metrics(profile_id, 120), alerts=db.alert_events(profile_id), current=status.get("metrics", {}), can_edit_alerts=db.has_server_permission(user, profile_id, "settings.edit"))
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):

@@ -84,6 +84,19 @@ class ServerProfileStore:
                 )
                 """
             )
+            # Upgrade pre-existing history using each profile's configured memory limit.
+            conn.execute("""UPDATE resource_metrics
+                SET memory_limit_mb=COALESCE((SELECT max_memory FROM server_profiles WHERE id=resource_metrics.server_id),0),
+                    memory_limit_percent=CASE WHEN COALESCE((SELECT max_memory FROM server_profiles WHERE id=resource_metrics.server_id),0)>0
+                        THEN ROUND(memory_mb*100.0/(SELECT max_memory FROM server_profiles WHERE id=resource_metrics.server_id),1) ELSE 0 END
+                WHERE memory_limit_percent=0 AND memory_mb>0 AND server_id IN (SELECT id FROM server_profiles)""")
+            for profile in conn.execute("SELECT id,directory FROM server_profiles").fetchall():
+                try:
+                    disk_total_gb = shutil.disk_usage(profile["directory"]).total / 1024**3
+                except OSError:
+                    continue
+                conn.execute("UPDATE resource_metrics SET disk_total_gb=?,disk_used_gb=MAX(0,?-disk_free_gb) WHERE server_id=? AND disk_total_gb=0",
+                             (disk_total_gb, disk_total_gb, profile["id"]))
 
     def list(self):
         with self.db._connect() as conn:
@@ -200,7 +213,7 @@ class MultiServerManager:
                     phase = "error" if phase == "starting" else "stopped"
                     self._phases[profile_id] = phase
             result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase, "phase_timeout": timeout_phase})
-            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"])
+            result["metrics"] = self._metrics(self.legacy_bridge.controller.server_process, profile["directory"], profile.get("max_memory"))
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -209,7 +222,7 @@ class MultiServerManager:
             self._started_at.pop(profile_id, None)
             if self._phases.get(profile_id) not in {"error", "stopped"}:
                 self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
-        metrics = self._metrics(process, profile["directory"])
+        metrics = self._metrics(process, profile["directory"], profile.get("max_memory"))
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],
@@ -221,36 +234,41 @@ class MultiServerManager:
         }
 
     @staticmethod
-    def _metrics(process, directory=None):
-        disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0}
+    def _metrics(process, directory=None, memory_limit_mb=None):
+        disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "disk_used_gb": 0.0, "disk_total_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0}
         available = psutil is not None
         if psutil is not None:
             try:
                 usage = psutil.disk_usage(str(directory or Path.cwd()))
                 net = psutil.net_io_counters()
-                disk = {"disk_used_percent": round(usage.percent, 1), "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 2), "net_sent_mb": round(net.bytes_sent / 1024 / 1024, 1), "net_recv_mb": round(net.bytes_recv / 1024 / 1024, 1)}
+                disk = {"disk_used_percent": round(usage.percent, 1), "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 2), "disk_used_gb": round(usage.used / 1024 / 1024 / 1024, 2), "disk_total_gb": round(usage.total / 1024 / 1024 / 1024, 2), "net_sent_mb": round(net.bytes_sent / 1024 / 1024, 1), "net_recv_mb": round(net.bytes_recv / 1024 / 1024, 1)}
             except (psutil.Error, OSError):
                 pass
         else:
             try:
                 usage = shutil.disk_usage(str(directory or Path.cwd()))
-                disk["disk_used_percent"] = round((usage.used / usage.total) * 100, 1)
-                disk["disk_free_gb"] = round(usage.free / 1024 / 1024 / 1024, 2)
+                disk.update({"disk_used_percent": round((usage.used / usage.total) * 100, 1), "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 2), "disk_used_gb": round(usage.used / 1024 / 1024 / 1024, 2), "disk_total_gb": round(usage.total / 1024 / 1024 / 1024, 2)})
             except OSError:
                 pass
+        memory_limit_mb = max(float(memory_limit_mb or 0), 0)
         if not process or process.poll() is not None or psutil is None:
-            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
+            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, "memory_limit_mb": memory_limit_mb, "memory_limit_percent": 0.0, **disk}
         try:
             proc = psutil.Process(process.pid)
+            memory_mb = round(proc.memory_info().rss / 1024 / 1024, 1)
+            cpu_count = psutil.cpu_count(logical=True) or 1
             return {
-                "cpu_percent": round(proc.cpu_percent(interval=None), 1),
-                "memory_mb": round(proc.memory_info().rss / 1024 / 1024, 1),
+                # Process.cpu_percent() can exceed 100 on multi-core hosts; normalize to total-machine capacity.
+                "cpu_percent": round(proc.cpu_percent(interval=None) / cpu_count, 1),
+                "memory_mb": memory_mb,
                 "memory_percent": round(proc.memory_percent(), 1),
+                "memory_limit_mb": memory_limit_mb,
+                "memory_limit_percent": round(memory_mb / memory_limit_mb * 100, 1) if memory_limit_mb else 0.0,
                 "available": available,
                 **disk,
             }
         except (psutil.Error, OSError):
-            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, **disk}
+            return {"available": available, "cpu_percent": 0.0, "memory_mb": 0.0, "memory_percent": 0.0, "memory_limit_mb": memory_limit_mb, "memory_limit_percent": 0.0, **disk}
 
     def statuses(self):
         return [self.status(item["id"]) for item in self.store.list()]
