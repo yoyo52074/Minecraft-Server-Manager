@@ -470,9 +470,10 @@ class WebDatabase:
                 "SELECT permission_key, allowed FROM server_permissions WHERE user_id = ? AND server_id = ?",
                 (user_id, server_id),
             ).fetchall()
-        if rows:
-            return {row["permission_key"] for row in rows if row["allowed"]}
-        return set()
+        permissions = {row["permission_key"] for row in rows if row["allowed"]}
+        if permissions.intersection({"schedule.create", "schedule.edit", "schedule.delete", "schedule.run"}):
+            permissions.add("schedule.view")
+        return permissions
 
     def has_server_permission(self, user: dict, server_id: int, permission_key: str) -> bool:
         if user["role"] == "admin":

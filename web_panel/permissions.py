@@ -36,6 +36,6 @@ PERMISSION_LABELS = {
 }
 
 ROLE_DEFAULTS = {
-    "viewer": {"server.view", "console.view", "files.view", "files.download", "settings.view", "backups.view", "plugins.view", "mods.view", "players.view", "resources.view"},
-    "operator": {"server.view", "server.start", "server.stop", "server.restart", "console.view", "console.send_command", "files.view", "files.upload", "files.download", "files.edit", "files.rename", "files.copy", "files.move", "files.delete", "files.compress", "files.extract", "settings.view", "backups.view", "backups.create", "plugins.view", "plugins.upload", "plugins.enable", "plugins.disable", "plugins.delete", "mods.view", "mods.upload", "mods.enable", "mods.disable", "mods.delete", "players.view", "players.kick", "players.whitelist", "resources.view", "resources.view_cpu", "resources.view_memory", "resources.view_disk", "resources.view_network"},
+    "viewer": {"server.view", "console.view", "files.view", "files.download", "settings.view", "backups.view", "plugins.view", "mods.view", "players.view", "schedule.view", "resources.view"},
+    "operator": {"server.view", "server.start", "server.stop", "server.restart", "console.view", "console.send_command", "files.view", "files.upload", "files.download", "files.edit", "files.rename", "files.copy", "files.move", "files.delete", "files.compress", "files.extract", "settings.view", "backups.view", "backups.create", "plugins.view", "plugins.upload", "plugins.enable", "plugins.disable", "plugins.delete", "mods.view", "mods.upload", "mods.enable", "mods.disable", "mods.delete", "players.view", "players.kick", "players.whitelist", "schedule.view", "resources.view", "resources.view_cpu", "resources.view_memory", "resources.view_disk", "resources.view_network"},
 }

@@ -744,6 +744,24 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(self.app.state.db.get_server_permissions(managed_id, self.profile_id),
                          {"server.view", "server.start", "resources.view"})
 
+    def test_schedule_permissions_include_required_view_access(self):
+        from web_panel.permissions import ROLE_DEFAULTS
+
+        self.assertIn("schedule.view", ROLE_DEFAULTS["viewer"])
+        self.assertIn("schedule.view", ROLE_DEFAULTS["operator"])
+        user_id = self.app.state.db.create_user("schedule-operator", "Schedule-password-123", "operator")
+        self.app.state.db.set_server_permissions(user_id, self.profile_id, {"server.view", "schedule.create"})
+        self.assertIn("schedule.view", self.app.state.db.get_server_permissions(user_id, self.profile_id))
+
+        session_id, _ = self.app.state.db.create_session(user_id)
+        client = TestClient(self.app)
+        client.cookies.set("mcm_session", session_id)
+        try:
+            response = client.get(f"/server/{self.profile_id}/schedules")
+            self.assertEqual(response.status_code, 200, response.text[:500])
+        finally:
+            client.close()
+
     def test_protect_last_admin_from_demotion_and_deletion(self):
         current_id = next(entry["id"] for entry in self.app.state.db.list_users() if entry["username"] == "admin")
         with self.assertRaisesRegex(ValueError, "最後一位"):
