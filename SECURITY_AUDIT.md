@@ -8,7 +8,7 @@
 
 找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **105 項測試通過**；Bandit 掃描 **6,492 行：High 0、Medium 0、Low 21**；pip-audit 回報 **No known vulnerabilities found**。
 
-這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。本輪修正已由 GitHub Actions 成功建置並通過 EXE 驗證及啟動 Smoke Test（[Run `38225026721`](https://github.com/yoyo52074/Minecraft-Server-Manager/actions/runs/38225026721)；程式 commit `fd80999a0adccd884f941afc5bfe804c91a890b4`）。
+這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。本輪修正已由 GitHub Actions 成功建置並通過 EXE 驗證及啟動 Smoke Test（[Run `38228064248`](https://github.com/yoyo52074/Minecraft-Server-Manager/actions/runs/38228064248)；程式 commit `8d8fb021bcf71e3ad6f50136f404fd3887d6a922`）。
 
 ## 修補摘要
 
@@ -36,7 +36,7 @@
 - `python -m unittest discover -s tests -v`：**105 項通過**。
 - Bandit：**6,492 行；High 0、Medium 0、Low 21**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
 - pip-audit：**No known vulnerabilities found**。
-- 本輪 Windows EXE：GitHub Actions 驗證成功，PE32+ x86-64，大小 **33,653,975 bytes**，SHA-256：`12fdb20674b0145991cd65aa1d9da808b71334ddc404ea25e2bc61cc8e7f435d`；Run `38225026721` 對應 commit `fd80999a0adccd884f941afc5bfe804c91a890b4`。
+- 本輪 Windows EXE：GitHub Actions 驗證與啟動 Smoke Test 成功，PE32+ x86-64，大小 **33,770,945 bytes**，SHA-256：`cc71e1a61e99970235f52881a785cf155907d19dbb598c580a4acc68316648ee`；Run `38228064248` 對應程式 commit `8d8fb021bcf71e3ad6f50136f404fd3887d6a922`。
 - 本機安全案例包含：無效 ZIP 衝突策略拒絕、ZIP staging 失敗不半套覆寫、備份還原 commit 失敗回滾、Windows 大小寫重複路徑拒絕、上傳超額／過期／final 清理、properties symlink 拒絕、profile 刪除後的 API／WebSocket 撤銷。
 - 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設；Forge 官方版本目錄動態查詢、latest build 選取、無介面安裝成功，以及非零退出／逾時後 installer 封存、profile 保持不變與更新鎖釋放。
 
