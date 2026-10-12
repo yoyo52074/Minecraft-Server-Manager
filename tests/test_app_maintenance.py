@@ -145,6 +145,38 @@ class MaintenanceApiTests(unittest.TestCase):
         dashboard = self.client.get("/")
         self.assertIn("留空時會在程式資料夾", dashboard.text)
 
+    def test_server_start_requires_explicit_eula_acceptance(self):
+        (Path(self.server_dir) / "server.jar").write_bytes(b"placeholder")
+        eula_path = Path(self.server_dir) / "eula.txt"
+        eula_path.write_text("eula=false\n", encoding="utf-8")
+
+        response = self.client.post(
+            f"/api/servers/{self.profile_id}/start",
+            headers={"x-csrf-token": self.csrf},
+            json={},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["eula_required"])
+        self.assertEqual(eula_path.read_text(encoding="utf-8"), "eula=false\n")
+        self.assertNotIn("eula=true", eula_path.read_text(encoding="utf-8"))
+
+        response = self.client.post(
+            f"/api/servers/{self.profile_id}/start",
+            headers={"x-csrf-token": self.csrf},
+            json={"accept_eula": True},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"])
+        self.assertEqual(eula_path.read_text(encoding="utf-8").strip(), "eula=true")
+
+    def test_server_page_explains_eula_confirmation_prompt(self):
+        (Path(self.server_dir) / "server.jar").write_bytes(b"placeholder")
+        response = self.client.get(f"/server/{self.profile_id}")
+        self.assertEqual(response.status_code, 200, response.text[:500])
+        self.assertIn("accept_eula:acceptEula", response.text)
+        self.assertIn("https://aka.ms/MinecraftEULA", response.text)
+        self.assertIn("只有在你已閱讀並同意條款", response.text)
+
     def test_start_without_paper_core_automatically_queues_install(self):
         profile = self.app.state.profiles.create(
             "Empty Paper", Path(self.temp.name) / "Empty Paper", "Paper", minecraft_version="1.21.4"

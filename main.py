@@ -483,12 +483,12 @@ class ApplicationController:
         threading.Thread(target=_run_installer, daemon=True).start()
 
     def setup_eula_and_finish(self):
-        self.set_status("正在設定 EULA...")
-        eula_path = os.path.join(self.server_manager.server_directory, "eula.txt")
+        self.set_status("等待 Minecraft EULA 確認...")
+        if not self.ensure_eula_consent():
+            self._auto_start_after_download = False
+            self.check_existing_server()
+            return
         try:
-            with open(eula_path, "w") as f:
-                f.write("eula=true\n")
-            self.log("EULA 同意完成！", "success")
             self.set_status("伺服器準備就緒！")
             self.update_server_info()
             self.check_existing_server()
@@ -496,7 +496,32 @@ class ApplicationController:
                 self._auto_start_after_download = False
                 self.root.after(500, self._actually_start_server)
         except Exception as e:
-            self.log(f"寫入 EULA 失敗: {e}", "error")
+            self.log(f"伺服器安裝後處理失敗: {e}", "error")
+
+    def ensure_eula_consent(self):
+        if self.is_eula_accepted():
+            return True
+        accepted = messagebox.askyesno(
+            "Minecraft EULA 同意確認",
+            "首次啟動前，請先閱讀 Minecraft EULA：\nhttps://aka.ms/MinecraftEULA\n\n"
+            "只有在你已閱讀並同意條款時，才選擇「是」。\n"
+            "選擇「否」會取消啟動，不會寫入 eula=true。",
+            parent=self.root,
+        )
+        if not accepted:
+            self.log("尚未同意 Minecraft EULA；伺服器不會啟動。", "warn")
+            self.set_status("等待同意 Minecraft EULA")
+            return False
+        eula_path = os.path.join(self.server_manager.server_directory, "eula.txt")
+        try:
+            with open(eula_path, "w", encoding="utf-8") as file:
+                file.write("eula=true\n")
+            self.log("已依使用者確認寫入 EULA 同意設定。", "success")
+            return True
+        except OSError as exc:
+            self.log(f"寫入 EULA 失敗: {exc}", "error")
+            messagebox.showerror("EULA 設定失敗", f"無法寫入 eula.txt：{exc}")
+            return False
 
     def check_existing_server(self):
         jar_files = self.get_server_jars()
@@ -515,6 +540,15 @@ class ApplicationController:
             self.root.start_button.config(state="normal")
             if properties_exist:
                 self._load_settings_page()
+        elif jar_files:
+            self.root.start_button.config(state="normal")
+            self.root.advanced_settings_button.config(state="disabled")
+            self.root.save_settings_button.config(state="disabled")
+            self.set_status("需要同意 Minecraft EULA")
+            self.root.status_detail_label.config(
+                text="啟動時會先顯示官方 EULA，只有同意後才會建立 eula.txt 並啟動"
+            )
+            self.update_server_info()
         elif core_selected:
             self.root.start_button.config(state="normal")
             self.root.advanced_settings_button.config(state="disabled")
@@ -633,6 +667,8 @@ class ApplicationController:
             messagebox.showerror(
                 "錯誤", "伺服器資料夾內有多個核心 .jar，請先保留要啟動的核心。"
             )
+            return
+        if not self.ensure_eula_consent():
             return
         server_jar_path = jar_files[0]
         metadata = self.core_metadata.load()

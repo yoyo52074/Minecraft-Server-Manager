@@ -136,6 +136,28 @@ class WebPanelServiceTests(unittest.TestCase):
         self.assertIn("Java 21", message)
         popen.assert_not_called()
 
+    def test_server_start_requires_eula_consent_before_launch(self):
+        directory = Path(self.temp.name) / "eula-consent"
+        profile = self.store.create("EULA consent", directory, "Paper", minecraft_version="1.21.4")
+        (directory / "server.jar").write_bytes(b"placeholder")
+        (directory / "eula.txt").write_text("eula=false\n", encoding="utf-8")
+        manager = MultiServerManager(self.store)
+
+        with patch.object(CoreAdapter, "resolve_java", return_value=("java", 21)), \
+             patch("web_panel.multi_server.subprocess.Popen") as popen, \
+             patch("web_panel.multi_server.threading.Thread.start"):
+            ok, message = manager.start(profile["id"])
+            self.assertFalse(ok)
+            self.assertIn("Minecraft EULA", message)
+            self.assertEqual((directory / "eula.txt").read_text(encoding="utf-8"), "eula=false\n")
+            popen.assert_not_called()
+
+            ok, message = manager.start(profile["id"], accept_eula=True)
+
+        self.assertTrue(ok, message)
+        self.assertEqual((directory / "eula.txt").read_text(encoding="utf-8").strip(), "eula=true")
+        popen.assert_called_once()
+
     def test_world_session_lock_blocks_start_but_stale_lock_file_does_not(self):
         directory = Path(self.temp.name) / "locked-world"
         profile = self.store.create("Locked world", directory, "Paper", minecraft_version="1.21.4")

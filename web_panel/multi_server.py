@@ -19,6 +19,10 @@ except ImportError:  # pragma: no cover - optional until installed
 
 
 CORE_TYPES = {"Vanilla", "Paper", "Forge", "Fabric"}
+EULA_REQUIRED_MESSAGE = (
+    "首次啟動前必須閱讀並同意 Minecraft EULA（https://aka.ms/MinecraftEULA）；"
+    "請確認同意後再啟動。"
+)
 WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
@@ -459,11 +463,40 @@ class MultiServerManager:
             return self.legacy_bridge.logs(limit)
         return self._logs.get(profile_id, [])[-max(1, min(limit, 500)):]
 
-    def start(self, profile_id):
+    def requires_eula(self, profile_id):
+        profile = self.store.get(profile_id)
+        if not profile:
+            return False
+        adapter = CoreAdapter(profile["core_type"])
+        if not adapter.find_launcher(Path(profile["directory"]), profile.get("launcher")):
+            return False
+        path = Path(profile["directory"]) / "eula.txt"
+        try:
+            return not any(
+                line.strip().casefold() == "eula=true"
+                for line in path.read_text(encoding="utf-8-sig").splitlines()
+            )
+        except OSError:
+            return True
+
+    @staticmethod
+    def _record_eula_acceptance(profile):
+        path = Path(profile["directory"]) / "eula.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("eula=true\n", encoding="utf-8")
+
+    def start(self, profile_id, accept_eula=False):
         profile = self.store.get(profile_id)
         if not profile:
             return False, "找不到伺服器"
         if self._is_legacy(profile):
+            if self.requires_eula(profile_id):
+                if not accept_eula:
+                    return False, EULA_REQUIRED_MESSAGE
+                try:
+                    self._record_eula_acceptance(profile)
+                except OSError as exc:
+                    return False, f"無法寫入 eula.txt：{exc}"
             ok, message = self.legacy_bridge.start()
             if ok:
                 self._phases[profile_id] = "starting"
@@ -489,6 +522,13 @@ class MultiServerManager:
                 java_path, java_major = adapter.resolve_java(profile, required_java, minecraft_version)
             except ValueError as exc:
                 return False, str(exc)
+            if self.requires_eula(profile_id):
+                if not accept_eula:
+                    return False, EULA_REQUIRED_MESSAGE
+                try:
+                    self._record_eula_acceptance(profile)
+                except OSError as exc:
+                    return False, f"無法寫入 eula.txt：{exc}"
             command = adapter.command(profile, java_path)
             java_bin = Path(java_path).resolve().parent
             process_env = os.environ.copy()

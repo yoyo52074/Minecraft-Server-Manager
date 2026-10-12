@@ -18,7 +18,13 @@ from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import MAX_UPLOAD_CHUNK_BYTES, SafeFileService
 from .core_update import CoreUpdateJobs
-from .multi_server import CORE_TYPES, CoreAdapter, MultiServerManager, ServerProfileStore
+from .multi_server import (
+    CORE_TYPES,
+    EULA_REQUIRED_MESSAGE,
+    CoreAdapter,
+    MultiServerManager,
+    ServerProfileStore,
+)
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
 from .java_runtime import JavaRuntimeJobs
@@ -1063,14 +1069,35 @@ def create_app(controller, database_path):
 
     # Keep the catch-all action route after all explicit /api/servers routes.
     @app.post("/api/servers/{profile_id}/{action}")
-    def server_action(profile_id: int, action: str, request: Request):
+    async def server_action(profile_id: int, action: str, request: Request):
         permission = {"start": "server.start", "stop": "server.stop", "force-stop": "server.force_stop"}.get(action)
         if not permission:
             raise HTTPException(status_code=404, detail="未知的操作")
         user = require_server_permission(request, profile_id, permission)
         check_csrf(request, user)
-        actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
+        payload = {}
+        if action == "start" and request.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
+            try:
+                payload = await request.json()
+            except (ValueError, TypeError):
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        accept_eula = payload.get("accept_eula") is True
+        actions = {
+            "start": lambda value: multi.start(value, accept_eula=accept_eula),
+            "stop": multi.stop,
+            "force-stop": lambda value: multi.stop(value, True),
+        }
         ok, message = actions[action](profile_id)
+        if action == "start" and not ok and message == EULA_REQUIRED_MESSAGE:
+            return {
+                "ok": False,
+                "eula_required": True,
+                "message": "Minecraft EULA 尚未同意。請先閱讀官方條款；只有確認同意後才可繼續。",
+            }
         if action == "start" and not ok and message == "找不到伺服器啟動檔，請先上傳或安裝核心":
             profile = profiles.get(profile_id)
             version = str((profile or {}).get("minecraft_version") or "").strip()
