@@ -176,6 +176,35 @@ class MaintenanceApiTests(unittest.TestCase):
         settings = self.client.get(f"/server/{self.profile_id}/settings")
         self.assertIn('name="server-port" type="number" min="1" max="65535" value="25602"', settings.text)
 
+    def test_settings_page_selects_values_loaded_from_properties(self):
+        properties_path = Path(self.server_dir) / "server.properties"
+        properties_path.write_text(
+            "motd=hello\ngamemode=creative\ndifficulty=hard\nonline-mode=false\npvp=false\nwhite-list=true\n",
+            encoding="utf-8",
+        )
+        response = self.client.get(f"/server/{self.profile_id}/settings")
+        self.assertEqual(response.status_code, 200, response.text[:500])
+        for selected in (
+            '<option value="creative" selected>創造</option>',
+            '<option value="hard" selected>hard</option>',
+            '<option value="false" selected>關閉</option>',
+            '<option value="true" selected>開啟</option>',
+        ):
+            self.assertIn(selected, response.text)
+
+    def test_settings_page_maps_legacy_numeric_values_and_preserves_unknown(self):
+        properties_path = Path(self.server_dir) / "server.properties"
+        properties_path.write_text(
+            "motd=hello\ngamemode=2\ndifficulty=3\nonline-mode=legacy-value\npvp=true\nwhite-list=false\n",
+            encoding="utf-8",
+        )
+        response = self.client.get(f"/server/{self.profile_id}/settings")
+        self.assertEqual(response.status_code, 200, response.text[:500])
+        self.assertIn('<option value="adventure" selected>冒險</option>', response.text)
+        self.assertIn('<option value="hard" selected>hard</option>', response.text)
+        self.assertIn('<option value="legacy-value" selected>未知：legacy-value</option>', response.text)
+        self.assertIn('<option value="false" selected>關閉</option>', response.text)
+
     def test_editing_server_properties_updates_profile_port(self):
         response = self.client.put(
             f"/api/servers/{self.profile_id}/files/text",

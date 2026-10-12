@@ -6,20 +6,25 @@
   <h1>{{ profile.name }}｜伺服器設定</h1>
   <p class="muted">儲存後需要重新啟動伺服器的項目會在下一次啟動時生效。</p>
 
+  {% set mode = properties.get('gamemode', 'survival')|string|trim|lower %}
+  {% set difficulty = properties.get('difficulty', 'easy')|string|trim|lower %}
+  {% set online_mode = properties.get('online-mode', 'true')|string|trim|lower %}
+  {% set pvp = properties.get('pvp', 'true')|string|trim|lower %}
+  {% set whitelist = properties.get('white-list', 'false')|string|trim|lower %}
   <form id="settings-form" class="card">
     <h2>基本設定</h2>
     <div class="grid">
       <div>
         <label>MOTD</label><input name="motd" value="{{ properties.get('motd','') }}">
-        <label>遊戲模式</label><select name="gamemode"><option value="survival">生存</option><option value="creative">創造</option><option value="adventure">冒險</option><option value="spectator">旁觀</option></select>
-        <label>難度</label><select name="difficulty"><option>peaceful</option><option>easy</option><option>normal</option><option>hard</option></select>
+        <label>遊戲模式</label><select name="gamemode">{% if mode not in ['survival', 'creative', 'adventure', 'spectator', '0', '1', '2', '3'] %}<option value="{{ mode }}" selected>未知：{{ mode }}</option>{% endif %}<option value="survival" {% if mode in ['survival', '0'] %}selected{% endif %}>生存</option><option value="creative" {% if mode in ['creative', '1'] %}selected{% endif %}>創造</option><option value="adventure" {% if mode in ['adventure', '2'] %}selected{% endif %}>冒險</option><option value="spectator" {% if mode in ['spectator', '3'] %}selected{% endif %}>旁觀</option></select>
+        <label>難度</label><select name="difficulty">{% if difficulty not in ['peaceful', 'easy', 'normal', 'hard', '0', '1', '2', '3'] %}<option value="{{ difficulty }}" selected>未知：{{ difficulty }}</option>{% endif %}<option value="peaceful" {% if difficulty in ['peaceful', '0'] %}selected{% endif %}>peaceful</option><option value="easy" {% if difficulty in ['easy', '1'] %}selected{% endif %}>easy</option><option value="normal" {% if difficulty in ['normal', '2'] %}selected{% endif %}>normal</option><option value="hard" {% if difficulty in ['hard', '3'] %}selected{% endif %}>hard</option></select>
         <label>最大玩家數</label><input name="max-players" type="number" min="1" value="{{ properties.get('max-players','20') }}">
       </div>
       <div>
         <label>伺服器連接埠</label><input name="server-port" type="number" min="1" max="65535" value="{{ properties.get('server-port', profile.server_port) }}">
-        <label>正版驗證</label><select name="online-mode"><option value="true">開啟</option><option value="false">關閉</option></select>
-        <label>PVP</label><select name="pvp"><option value="true">開啟</option><option value="false">關閉</option></select>
-        <label>白名單</label><select name="white-list"><option value="true">開啟</option><option value="false">關閉</option></select>
+        <label>正版驗證</label><select name="online-mode">{% if online_mode not in ['true', 'false'] %}<option value="{{ online_mode }}" selected>未知：{{ online_mode }}</option>{% endif %}<option value="true" {% if online_mode == 'true' %}selected{% endif %}>開啟</option><option value="false" {% if online_mode == 'false' %}selected{% endif %}>關閉</option></select>
+        <label>PVP</label><select name="pvp">{% if pvp not in ['true', 'false'] %}<option value="{{ pvp }}" selected>未知：{{ pvp }}</option>{% endif %}<option value="true" {% if pvp == 'true' %}selected{% endif %}>開啟</option><option value="false" {% if pvp == 'false' %}selected{% endif %}>關閉</option></select>
+        <label>白名單</label><select name="white-list">{% if whitelist not in ['true', 'false'] %}<option value="{{ whitelist }}" selected>未知：{{ whitelist }}</option>{% endif %}<option value="true" {% if whitelist == 'true' %}selected{% endif %}>開啟</option><option value="false" {% if whitelist == 'false' %}selected{% endif %}>關閉</option></select>
       </div>
     </div>
 
