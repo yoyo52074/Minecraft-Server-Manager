@@ -14,6 +14,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from core_metadata import java_version_compatible
+
 
 class JavaRuntimeJobs:
     """Find an installed Java runtime or install Temurin for a server."""
@@ -48,9 +50,12 @@ class JavaRuntimeJobs:
                 timeout=8, check=False, creationflags=cls._creation_flags(),
             )
             output = f"{result.stdout}\n{result.stderr}"
-            match = re.search(r'version\s+"(\d+)', output, re.I)
-            if not match:
-                match = re.search(r"openjdk\s+(\d+)", output, re.I)
+            match = re.search(r'version\s+"(\d+)(?:\.(\d+))?', output, re.I)
+            if match:
+                major = int(match.group(1))
+                minor = int(match.group(2) or 0)
+                return minor if major == 1 and minor else major
+            match = re.search(r"openjdk\s+(\d+)", output, re.I)
             return int(match.group(1)) if match else 0
         except (OSError, subprocess.SubprocessError, ValueError):
             return 0
@@ -165,7 +170,9 @@ class JavaRuntimeJobs:
         profile = self.profiles.get(server_id)
         if not profile:
             raise ValueError("找不到伺服器")
-        required_major = max(17, int(required_major))
+        required_major = int(required_major)
+        if required_major not in {8, 11, 16, 17, 21, 25}:
+            raise ValueError("不支援的 Java 相容版本")
         with self._lock:
             active_id = self._active_by_server.get(server_id)
             if active_id and self._jobs.get(active_id, {}).get("status") in {"queued", "running"}:
@@ -173,7 +180,7 @@ class JavaRuntimeJobs:
             job_id = uuid.uuid4().hex
             self._jobs[job_id] = {
                 "id": job_id, "server_id": server_id, "status": "queued",
-                "stage": "search", "message": "正在搜尋電腦上已安裝的 Java…",
+                "stage": "search", "message": f"正在搜尋與 Minecraft 相容的 Java {required_major}…",
                 "required_version": required_major, "java_path": "", "java_version": 0,
                 "progress": 0, "downloaded_bytes": 0, "total_bytes": 0,
                 "error": "", "start_after": bool(start_after), "start_result": None,
@@ -196,7 +203,7 @@ class JavaRuntimeJobs:
             actor_id, "auto_configure_java",
             f"{source} Java {major}：{path}", server_id=profile["id"],
         )
-        message = f"已找到並套用 Java {major}：{path}"
+        message = f"已找到並套用相容 Java {major}：{path}"
         start_result = None
         if start_after and self.start_server:
             ok, start_message = self.start_server(profile["id"])
@@ -231,15 +238,15 @@ class JavaRuntimeJobs:
         self._update(job_id, status="running")
         try:
             installed = self.discover()
-            suitable = next((item for item in installed if item["version"] >= required), None)
+            suitable = next((item for item in installed if java_version_compatible(required, item["version"])), None)
             if suitable:
                 self._apply(job_id, profile, suitable["path"], suitable["version"], "自動偵測", actor_id, start_after)
                 return
-            self._update(job_id, stage="download", message=f"找不到 Java {required}+，正在自動下載 Temurin Java {required}…")
+            self._update(job_id, stage="download", message=f"找不到相容的 Java {required}，正在自動下載 Temurin Java {required}…")
             path = self._download_and_install(required, job_id)
             major = self._version(path)
-            if major < required:
-                raise RuntimeError(f"下載的 Java 版本不足：Java {major}，需求 Java {required}+。")
+            if not java_version_compatible(required, major):
+                raise RuntimeError(f"下載的 Java 版本不符：取得 Java {major}，此 Minecraft 版本需使用 Java {required}。")
             self._apply(job_id, profile, path, major, "自動下載並安裝", actor_id, start_after)
         except Exception as exc:
             self._update(job_id, status="failed", stage="failed", error=str(exc),
@@ -249,7 +256,7 @@ class JavaRuntimeJobs:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         final_dir = self.runtime_root / f"jdk-{major}"
         executable = final_dir / "bin" / ("java.exe" if os.name == "nt" else "java")
-        if executable.is_file() and self._version(executable) >= major:
+        if executable.is_file() and java_version_compatible(major, self._version(executable)):
             return executable
         if os.name != "nt":
             raise RuntimeError("自動下載功能目前支援 Windows x64；請在此系統手動安裝 Java。")
@@ -337,8 +344,8 @@ class JavaRuntimeJobs:
                 self._update(job_id, stage="verify", progress=100,
                              message="解壓完成，正在確認 Java 版本…")
             detected = self._version(staged_java)
-            if detected < major:
-                raise RuntimeError(f"下載檔案版本驗證失敗：Java {detected}，需求 Java {major}+。")
+            if not java_version_compatible(major, detected):
+                raise RuntimeError(f"下載檔案版本驗證失敗：Java {detected}，此 Minecraft 版本需使用 Java {major}。")
             if final_dir.exists():
                 shutil.rmtree(final_dir)
             os.replace(staged_dir, final_dir)

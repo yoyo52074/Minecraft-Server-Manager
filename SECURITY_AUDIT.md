@@ -6,7 +6,7 @@
 
 ## 結論
 
-找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **105 項測試通過**；Bandit 掃描 **6,492 行：High 0、Medium 0、Low 21**；pip-audit 回報 **No known vulnerabilities found**。
+找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **112 項測試通過**；Bandit 掃描 **6,531 行：High 0、Medium 0、Low 21**；pip-audit 回報 **No known vulnerabilities found**。
 
 這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。本輪修正已由 GitHub Actions 成功建置並通過 EXE 驗證及啟動 Smoke Test（[Run `38228064248`](https://github.com/yoyo52074/Minecraft-Server-Manager/actions/runs/38228064248)；程式 commit `8d8fb021bcf71e3ad6f50136f404fd3887d6a922`）。
 
@@ -23,7 +23,7 @@
 | 中 | 固定暫存檔名或 `server.properties` symlink 可能把寫入導向伺服器目錄外。 | `server.properties` 拒絕 symlink／reparse point，設定透過同目錄暫存檔原子替換；一般上傳、文字編輯、版本回存、ZIP 建立使用獨佔隨機暫存檔。設定安全快照只讀一般檔案，並限制 4 MiB。 |
 | 中 | 核心／Java 下載可能被重新導向、惡意檔名或超大 ZIP 利用。 | 下載限定 HTTPS 主機 allowlist 並逐跳驗證 redirect；遠端檔名限制 basename；核心下載上限 1 GiB，Java ZIP 限制下載／展開量與 entry 數，拒絕 symlink／特殊項目。 |
 | 中 | Webhook 重新導向／URL port 差異可能突破預期 allowlist，排程保存端與實際送出端驗證不一致。 | 設定與送出共用 validator，只接受 Discord／Slack 官方 HTTPS host、預期路徑、443 port、無 userinfo，並限制 500 字元；送出有 timeout 且不跟隨 redirect。 |
-| 中 | Java 不足時伺服器無法啟動；POSIX Forge `run.sh` 曾被當作 JAR 啟動。 | Java 不足會搜尋／下載符合版本後重試；Forge `.sh` 在 POSIX 以 `/bin/sh` argv 啟動，Windows 明確拒絕 POSIX 腳本；未使用 `shell=True`。 |
+| 中 | Java 不足或主版本不相容時伺服器無法啟動；POSIX Forge `run.sh` 曾被當作 JAR 啟動。 | Java 8／11／16 的舊版伺服器固定檢查相符主版本，發現只有較新 Java 時會自動搜尋／下載正確版本；Java 17+ 按最低需求接受更新版。Java 8 舊式 `1.8.0_x` 版本字串可正確辨識；不再採用舊 `core-info` 中過期的 `java_required` 覆寫現行 Minecraft 版本。Forge `.sh` 在 POSIX 以 `/bin/sh` argv 啟動，Windows 明確拒絕 POSIX 腳本；未使用 `shell=True`。 |
 | 低 | metrics、玩家查詢及 profile 更新曾使用動態 SQL 字串。 | 改用固定 SQL 與參數繫結。 |
 | 低 | 總覽頁有多餘核心支援標語。 | 已移除並由測試覆蓋。 |
 | 中 | 管理器關閉時固定等待 3 秒、Web 停止時 15 秒後自動 kill，可能在 Paper 世界存檔仍進行時關閉／殺掉 Java，留下持鎖程序或造成世界損壞。 | 桌面關閉改為等待 Java 與輸出執行緒結束；Web 正常停止不再自動強制終止；重啟等待舊程序退出；啟動與核心更新前以 OS file lock 檢查世界 `session.lock`，提示使用者勿刪鎖檔。 |
@@ -33,12 +33,12 @@
 ## 驗證結果
 
 - Python 語法編譯：本輪修改模組通過。
-- `python -m unittest discover -s tests -v`：**105 項通過**。
-- Bandit：**6,492 行；High 0、Medium 0、Low 21**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
+- `python -m unittest discover -s tests -v`：**112 項通過**。
+- Bandit：**6,531 行；High 0、Medium 0、Low 21**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
 - pip-audit：**No known vulnerabilities found**。
 - 本輪 Windows EXE：GitHub Actions 驗證與啟動 Smoke Test 成功，PE32+ x86-64，大小 **33,770,945 bytes**，SHA-256：`cc71e1a61e99970235f52881a785cf155907d19dbb598c580a4acc68316648ee`；Run `38228064248` 對應程式 commit `8d8fb021bcf71e3ad6f50136f404fd3887d6a922`。
 - 本機安全案例包含：無效 ZIP 衝突策略拒絕、ZIP staging 失敗不半套覆寫、備份還原 commit 失敗回滾、Windows 大小寫重複路徑拒絕、上傳超額／過期／final 清理、properties symlink 拒絕、profile 刪除後的 API／WebSocket 撤銷。
-- 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設；Forge 官方版本目錄動態查詢、latest build 選取、無介面安裝成功，以及非零退出／逾時後 installer 封存、profile 保持不變與更新鎖釋放。
+- 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設；Forge 官方版本目錄動態查詢、latest build 選取、無介面安裝成功，以及非零退出／逾時後 installer 封存、profile 保持不變與更新鎖釋放。Java 另覆蓋 8／11／16 舊版主版本精確比對、Java 8 舊式版本字串、僅安裝較新 Java 時的自動下載／重試、現代版接受更新 Java，以及舊 metadata 不得覆蓋 profile 版本。
 
 ## 部署與剩餘風險
 

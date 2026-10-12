@@ -53,11 +53,49 @@ class WebPanelServiceTests(unittest.TestCase):
         self.assertNotIn("/", folder)
 
     def test_minecraft_java_requirements(self):
+        self.assertEqual(minimum_java_version("1.11.2"), 8)
+        self.assertEqual(minimum_java_version("1.12.2"), 11)
+        self.assertEqual(minimum_java_version("1.16.4"), 11)
+        self.assertEqual(minimum_java_version("1.16.5"), 16)
+        self.assertEqual(minimum_java_version("1.17.1"), 17)
         self.assertEqual(minimum_java_version("1.20.4"), 17)
         self.assertEqual(minimum_java_version("1.20.5"), 21)
         self.assertEqual(minimum_java_version("1.21.4"), 21)
         self.assertEqual(minimum_java_version("26.1"), 25)
         self.assertEqual(minimum_java_version("27.0"), 25)
+
+    def test_profile_minecraft_version_overrides_stale_core_metadata_java_target(self):
+        directory = Path(self.temp.name) / "stale-java-metadata"
+        profile = self.store.create("Updated profile", directory, "Paper", minecraft_version="1.12.2")
+        (directory / "core-info.json").write_text(
+            json.dumps({"minecraft_version": "26.2", "java_required": 25}), encoding="utf-8"
+        )
+        required, version = CoreAdapter.required_java_version(profile)
+        self.assertEqual((required, version), (11, "1.12.2"))
+
+    def test_java_compatibility_pins_legacy_but_allows_newer_modern_runtime(self):
+        from core_metadata import java_version_compatible
+        self.assertTrue(java_version_compatible(8, 8))
+        self.assertFalse(java_version_compatible(11, 25))
+        self.assertFalse(java_version_compatible(16, 17))
+        self.assertTrue(java_version_compatible(17, 25))
+        self.assertTrue(java_version_compatible(21, 25))
+        self.assertFalse(java_version_compatible(21, 17))
+
+    def test_modern_server_accepts_newer_java_runtime(self):
+        profile = self.store.create("Modern Java", Path(self.temp.name) / "modern-java", "Paper",
+                                    minecraft_version="1.21.4", java_path="java")
+        with patch.object(CoreAdapter, "java_major_version", return_value=25):
+            executable, major = CoreAdapter.resolve_java(profile, 21, "1.21.4")
+        self.assertTrue(executable.endswith("java"))
+        self.assertEqual(major, 25)
+
+    def test_legacy_server_rejects_newer_java_major(self):
+        profile = self.store.create("Legacy Java", Path(self.temp.name) / "legacy-java", "Paper",
+                                    minecraft_version="1.12.2", java_path="java")
+        with patch.object(CoreAdapter, "java_major_version", return_value=25):
+            with self.assertRaisesRegex(ValueError, "需要 Java 11"):
+                CoreAdapter.resolve_java(profile, 11, "1.12.2")
 
     def test_server_start_rejects_java_below_minecraft_requirement(self):
         directory = Path(self.temp.name) / "minecraft-26-1"

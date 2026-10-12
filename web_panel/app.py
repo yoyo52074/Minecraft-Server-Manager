@@ -18,11 +18,10 @@ from server_manager import ServerManager
 from .database import WebDatabase
 from .file_service import MAX_UPLOAD_CHUNK_BYTES, SafeFileService
 from .core_update import CoreUpdateJobs
-from .multi_server import CORE_TYPES, MultiServerManager, ServerProfileStore
+from .multi_server import CORE_TYPES, CoreAdapter, MultiServerManager, ServerProfileStore
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
 from .java_runtime import JavaRuntimeJobs
-from core_metadata import minimum_java_version
 
 ROLES = {"admin", "operator", "viewer"}
 
@@ -451,12 +450,12 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "settings.edit_java")
         check_csrf(request, user)
         profile = profiles.get(profile_id)
-        required = minimum_java_version(profile.get("minecraft_version"))
+        required, minecraft_version = CoreAdapter.required_java_version(profile)
         try:
             job_id = java_runtime.start(profile_id, required, user["user_id"])
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"job_id": job_id, "required_version": required}
+        return {"job_id": job_id, "required_version": required, "minecraft_version": minecraft_version}
 
     @app.get("/api/servers/{profile_id}/java/auto/{job_id}")
     def auto_configure_java_status(profile_id: int, job_id: str, request: Request):
@@ -1099,7 +1098,7 @@ def create_app(controller, database_path):
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             return {"ok": False, "java_setup_job_id": job_id,
-                    "message": f"{message} 正在自動搜尋 Java {required}+；若找不到會自動下載，完成後重試啟動。"}
+                    "message": f"{message} 正在自動搜尋／下載相容 Java {required}，完成後重試啟動。"}
         return {"ok": ok, "message": message}
 
     @app.websocket("/ws/logs")

@@ -9,7 +9,7 @@ import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from core_metadata import minimum_java_version
+from core_metadata import minimum_java_version, java_version_compatible
 from world_lock import WorldLockProbeError, is_world_locked
 
 try:
@@ -97,7 +97,7 @@ class CoreAdapter:
                 metadata = json.load(file)
         except (OSError, ValueError, TypeError):
             pass
-        version = metadata.get("minecraft_version") or profile.get("minecraft_version")
+        version = profile.get("minecraft_version") or metadata.get("minecraft_version")
         if not version or not re.search(r"\d+\.\d+", str(version)):
             launcher = launcher or CoreAdapter(profile["core_type"]).find_launcher(
                 directory, profile.get("launcher")
@@ -107,10 +107,6 @@ class CoreAdapter:
                 if match:
                     version = match.group(1)
         required = minimum_java_version(version)
-        try:
-            required = max(required, int(metadata.get("java_required") or 0))
-        except (TypeError, ValueError):
-            pass
         return required, str(version or "未知版本")
 
     @staticmethod
@@ -152,16 +148,18 @@ class CoreAdapter:
                 continue
             if major:
                 found.append((executable, major))
-                if major >= required_version:
+                if java_version_compatible(required_version, major):
                     return executable, major
-        requirement = f"Minecraft {minecraft_version} 需要 Java {required_version} 或更新版本。"
+        requirement = (f"Minecraft {minecraft_version} 需要 Java {required_version}（舊版需相同主版本）。"
+                       if required_version <= 16 else
+                       f"Minecraft {minecraft_version} 需要 Java {required_version} 或更新版本。")
         if found:
             detected = ", ".join(f"Java {major}（{executable}）" for executable, major in found)
             raise ValueError(
-                f"{requirement}目前找到的 Java 版本不足：{detected}。請到「伺服器設定 → Java 路徑」指定已安裝的 Java {required_version}+，再重新啟動。"
+                f"{requirement}目前找到不相容的 Java：{detected}。系統會嘗試自動準備 Java {required_version}。"
             )
         raise ValueError(
-            f"{requirement}找不到可執行的 Java。請安裝 Java {required_version}+，並在「伺服器設定 → Java 路徑」指定 java.exe（或將 Java 加入 PATH）。"
+            f"{requirement}找不到可執行的 Java。請安裝 Java {required_version}，或使用「伺服器設定 → Java 路徑」自動搜尋與安裝。"
         )
 
 

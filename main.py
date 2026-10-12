@@ -14,7 +14,7 @@ import tkinter as tk
 
 from server_manager import ServerManager
 from backup_manager import BackupManager
-from core_metadata import CoreMetadata, minimum_java_version
+from core_metadata import CoreMetadata, minimum_java_version, java_version_compatible
 from diagnostics import ServerDiagnostics
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, COLORS
 from web_panel.app import create_app
@@ -626,8 +626,6 @@ class ApplicationController:
             if metadata_version
             else self.get_required_java_version(server_jar_path)
         )
-        if metadata_version and required_java < int(metadata.get("java_required") or 0):
-            required_java = int(metadata["java_required"])
         properties = self.server_manager.get_server_properties()
         try:
             if is_world_locked(self.server_directory):
@@ -651,8 +649,8 @@ class ApplicationController:
         if not self.ensure_java_version(required_java):
             if messagebox.askyesno(
                 "需要更新 Java",
-                f"此 Minecraft 版本需要 Java {required_java} 或更新版本。\n"
-                f"目前 Java 版本不足，是否要自動下載 Java {required_java}？",
+                f"此 Minecraft 版本需使用 Java {required_java}{' 或更新版本' if required_java >= 17 else '（舊版需相同主版本）'}。\n"
+                f"目前設定的 Java 主版本不相容，是否要自動下載 Java {required_java}？",
             ):
                 self.download_java(required_java, start_after=True)
             else:
@@ -815,15 +813,23 @@ class ApplicationController:
         return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
     def detect_available_java(self):
-        if self.ensure_java_version(17):
-            self.log(f"偵測到 Java {self.java_major_version}", "success")
+        detected = 0
+        for executable in (self.java_executable_path, "java"):
+            detected = self.get_java_major_version(executable)
+            if detected:
+                self.java_executable_path = executable
+                self.java_major_version = detected
+                break
+        if detected:
+            self.log(f"偵測到 Java {detected}", "success")
             self.root.java_info_label.config(
-                text=f"Java：{self.java_major_version}\n需求：依核心版本檢查"
+                text=f"Java：{detected}\n適用版本：啟動時依 Minecraft 版本檢查"
             )
         else:
             self.root.java_info_label.config(
-                text="Java：尚未安裝\n需求：啟動時自動判斷"
+                text="Java：尚未安裝\n啟動時依 Minecraft 版本自動判斷"
             )
+
 
     def get_java_major_version(self, executable):
         try:
@@ -835,9 +841,12 @@ class ApplicationController:
                 check=True,
             )
             output = f"{result.stdout}\n{result.stderr}"
-            match = re.search(r'version\s+"(\d+)', output)
-            if not match:
-                match = re.search(r"openjdk\s+(\d+)", output)
+            match = re.search(r'version\s+"(\d+)(?:\.(\d+))?', output, re.I)
+            if match:
+                major = int(match.group(1))
+                minor = int(match.group(2) or 0)
+                return minor if major == 1 and minor else major
+            match = re.search(r"openjdk\s+(\d+)", output, re.I)
             return int(match.group(1)) if match else 0
         except (FileNotFoundError, subprocess.CalledProcessError, OSError, ValueError):
             return 0
@@ -933,6 +942,12 @@ class ApplicationController:
                 extracted_folder = os.path.join(
                     temp_extract_path, os.listdir(temp_extract_path)[0]
                 )
+                staged_java_path = os.path.join(extracted_folder, "bin", "java.exe")
+                detected_version = self.get_java_major_version(staged_java_path)
+                if not java_version_compatible(java_major, detected_version):
+                    raise RuntimeError(
+                        f"下載檔案版本不符：Java {detected_version}，需求 Java {java_major}。"
+                    )
                 final_jdk_path = os.path.join(self.app_directory, f"jdk-{java_major}")
                 if os.path.exists(final_jdk_path):
                     shutil.rmtree(final_jdk_path)

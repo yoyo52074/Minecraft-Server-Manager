@@ -87,7 +87,7 @@ class CoreUpdateJobs:
         return job_id
 
     def _forge_java(self, job_id, profile, version, actor_id):
-        required = max(17, minimum_java_version(version))
+        required = minimum_java_version(version)
         try:
             java_path, _ = CoreAdapter.resolve_java(profile, required, version)
             self.profiles.update(profile["id"], {"java_path": java_path})
