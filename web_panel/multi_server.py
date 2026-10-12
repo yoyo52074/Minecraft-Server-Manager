@@ -363,6 +363,8 @@ class MultiServerManager:
         self._phases = {}
         self._phase_at = {}
         self._io_samples = {}
+        self._cpu_samples = {}
+        self._cpu_lock = threading.Lock()
         self._core_updates = set()
 
     def _with_io_rates(self, profile_id, metrics):
@@ -375,6 +377,50 @@ class MultiServerManager:
         self._io_samples[profile_id]=(now,read_bytes,write_bytes)
         metrics["disk_read_mb_s"]=round(read_rate,3);metrics["disk_write_mb_s"]=round(write_rate,3)
         return metrics
+
+    def _sample_cpu_percent(self, profile_id, process):
+        if not process or psutil is None:
+            with self._cpu_lock:
+                self._cpu_samples.pop(profile_id, None)
+            return 0.0
+        try:
+            if process.poll() is not None:
+                with self._cpu_lock:
+                    self._cpu_samples.pop(profile_id, None)
+                return 0.0
+            pid = int(process.pid)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return 0.0
+
+        now = time.monotonic()
+        with self._cpu_lock:
+            sample = self._cpu_samples.get(profile_id)
+            if sample and sample["pid"] == pid:
+                if now - sample["sampled_at"] < 1.0:
+                    return sample["percent"]
+                sampler = sample["process"]
+            else:
+                try:
+                    sampler = psutil.Process(pid)
+                    sampler.cpu_percent(interval=None)  # establish a baseline for the next sample
+                except Exception:
+                    self._cpu_samples.pop(profile_id, None)
+                    return 0.0
+                self._cpu_samples[profile_id] = {
+                    "pid": pid,
+                    "process": sampler,
+                    "sampled_at": now,
+                    "percent": 0.0,
+                }
+                return 0.0
+
+            try:
+                percent = max(0.0, float(sampler.cpu_percent(interval=None)))
+            except Exception:
+                self._cpu_samples.pop(profile_id, None)
+                return 0.0
+            sample.update(sampled_at=now, percent=percent)
+            return percent
 
     def _is_legacy(self, profile):
         return self.legacy_bridge and str(Path(profile["directory"]).resolve()) == str(Path(self.legacy_bridge.controller.server_directory).resolve())
@@ -394,7 +440,12 @@ class MultiServerManager:
                     phase = "error" if phase == "starting" else "stopped"
                     self._phases[profile_id] = phase
             result.update({"id": profile_id, "name": profile["name"], "core_type": profile["core_type"], "directory": profile["directory"], "server_port": profile["server_port"], "logs": self.legacy_bridge.logs(100), "phase": phase, "phase_timeout": timeout_phase})
-            result["metrics"] = self._with_io_rates(profile_id,self._metrics(self.legacy_bridge.controller.server_process, profile["directory"], profile.get("max_memory")))
+            process = self.legacy_bridge.controller.server_process
+            cpu_percent = self._sample_cpu_percent(profile_id, process)
+            result["metrics"] = self._with_io_rates(
+                profile_id,
+                self._metrics(process, profile["directory"], profile.get("max_memory"), cpu_percent),
+            )
             return result
         process = self._processes.get(profile_id)
         running = bool(process and process.poll() is None)
@@ -403,7 +454,11 @@ class MultiServerManager:
             self._started_at.pop(profile_id, None)
             if self._phases.get(profile_id) not in {"error", "stopped"}:
                 self._phases[profile_id] = "error" if process and process.returncode not in (None, 0) else "stopped"
-        metrics = self._with_io_rates(profile_id,self._metrics(process, profile["directory"], profile.get("max_memory")))
+        cpu_percent = self._sample_cpu_percent(profile_id, process)
+        metrics = self._with_io_rates(
+            profile_id,
+            self._metrics(process, profile["directory"], profile.get("max_memory"), cpu_percent),
+        )
         return {
             "id": profile_id, "name": profile["name"], "core_type": profile["core_type"],
             "directory": profile["directory"], "server_port": profile["server_port"],
@@ -415,7 +470,7 @@ class MultiServerManager:
         }
 
     @staticmethod
-    def _metrics(process, directory=None, memory_limit_mb=None):
+    def _metrics(process, directory=None, memory_limit_mb=None, sampled_cpu_percent=None):
         disk = {"disk_used_percent": 0.0, "disk_free_gb": 0.0, "disk_used_gb": 0.0, "disk_total_gb": 0.0, "net_sent_mb": 0.0, "net_recv_mb": 0.0,"disk_read_bytes":0,"disk_write_bytes":0}
         available = psutil is not None
         if psutil is not None:
@@ -441,9 +496,14 @@ class MultiServerManager:
                 io=proc.io_counters();disk_read_bytes=int(io.read_bytes);disk_write_bytes=int(io.write_bytes)
             except Exception:disk_read_bytes=disk_write_bytes=0
             cpu_count = psutil.cpu_count(logical=True) or 1
+            raw_cpu_percent = (
+                proc.cpu_percent(interval=None)
+                if sampled_cpu_percent is None
+                else sampled_cpu_percent
+            )
             return {
                 # Process.cpu_percent() can exceed 100 on multi-core hosts; normalize to total-machine capacity.
-                "cpu_percent": round(proc.cpu_percent(interval=None) / cpu_count, 1),
+                "cpu_percent": round(raw_cpu_percent / cpu_count, 1),
                 "memory_mb": memory_mb,
                 "memory_percent": round(proc.memory_percent(), 1),
                 "memory_limit_mb": memory_limit_mb,

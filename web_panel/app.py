@@ -79,8 +79,47 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=403, detail=f"缺少權限：{permission}")
         return user
 
+    def validated_server_port(value):
+        if isinstance(value, bool):
+            raise ValueError("伺服器連接埠必須介於 1 到 65535")
+        try:
+            port = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError("伺服器連接埠必須介於 1 到 65535") from exc
+        if not 1 <= port <= 65535:
+            raise ValueError("伺服器連接埠必須介於 1 到 65535")
+        return port
+
+    def sync_server_port(profile, properties=None):
+        if not profile:
+            return profile, properties
+        if properties is None:
+            properties = ServerManager(profile["directory"]).get_server_properties()
+        raw_port = properties.get("server-port")
+        if raw_port is None:
+            properties_path = Path(profile["directory"]) / "server.properties"
+            if not properties_path.is_file() or properties_path.is_symlink():
+                return profile, properties
+            port = 25565  # Minecraft's default when server-port is omitted.
+        else:
+            try:
+                port = validated_server_port(raw_port)
+            except ValueError:
+                return profile, properties
+        if int(profile.get("server_port") or 25565) != port:
+            profile = profiles.update(profile["id"], {"server_port": port})
+        return profile, properties
+
     def visible_servers(user):
-        return [item for item in multi.statuses() if user["role"] == "admin" or db.has_server_permission(user, item["id"], "server.view")]
+        visible = []
+        for item in multi.statuses():
+            if user["role"] != "admin" and not db.has_server_permission(user, item["id"], "server.view"):
+                continue
+            profile, _ = sync_server_port(profiles.get(item["id"]))
+            if profile:
+                item["server_port"] = profile["server_port"]
+            visible.append(item)
+        return visible
 
     def render(request, template, **context):
         context.update({"user": current_user(request), "setup_required": db.user_count() == 0})
@@ -145,15 +184,17 @@ def create_app(controller, database_path):
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
+        profile, _ = sync_server_port(profile)
         return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=current_user(request)["csrf_token"])
 
     @app.get("/server/{profile_id}/settings", response_class=HTMLResponse)
     def settings_page(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "settings.view")
         profile = profiles.get(profile_id)
+        profile, properties = sync_server_port(profile)
         can_edit_core = db.has_server_permission(user, profile_id, "settings.edit_startup")
         can_edit_java = db.has_server_permission(user, profile_id, "settings.edit_java")
-        return render(request, "settings.html", profile=profile, properties=ServerManager(profile["directory"]).get_server_properties(), csrf=user["csrf_token"], can_edit_core=can_edit_core, can_edit_java=can_edit_java)
+        return render(request, "settings.html", profile=profile, properties=properties, csrf=user["csrf_token"], can_edit_core=can_edit_core, can_edit_java=can_edit_java)
 
     @app.get("/server/{profile_id}/history", response_class=HTMLResponse)
     def server_history_page(profile_id: int, request: Request):
@@ -250,13 +291,22 @@ def create_app(controller, database_path):
         check_csrf(request, user)
         payload = await request.json()
         try:
+            requested_port = validated_server_port(payload.get("server_port", 25565))
             profile = profiles.create(
                 payload.get("name", ""), payload.get("directory", ""), payload.get("core_type", "Paper"),
                 minecraft_version=payload.get("minecraft_version", ""), java_path=payload.get("java_path", "java"),
                 min_memory=payload.get("min_memory", 1024), max_memory=payload.get("max_memory", 2048),
-                server_port=payload.get("server_port", 25565), launcher=payload.get("launcher", ""),
+                server_port=requested_port, launcher=payload.get("launcher", ""),
                 auto_restart=payload.get("auto_restart", False),
             )
+            manager = ServerManager(profile["directory"])
+            properties = manager.get_server_properties()
+            if "server-port" in properties:
+                profile, _ = sync_server_port(profile, properties)
+            else:
+                properties["server-port"] = str(requested_port)
+                manager.save_server_properties(properties)
+                profile = profiles.update(profile["id"], {"server_port": requested_port})
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "create_server", str(profile["id"]), server_id=profile["id"])
@@ -268,6 +318,7 @@ def create_app(controller, database_path):
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
+        profile, _ = sync_server_port(profile)
         profile["status"] = multi.status(profile_id)
         return profile
 
@@ -278,7 +329,20 @@ def create_app(controller, database_path):
         if profile_id in multi._core_updates:
             raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再修改伺服器資料")
         try:
-            profile = profiles.update(profile_id, await request.json())
+            values = await request.json()
+            if not isinstance(values, dict):
+                raise ValueError("伺服器設定格式錯誤")
+            if "server_port" in values:
+                port = validated_server_port(values["server_port"])
+                current = profiles.get(profile_id)
+                directory = str(Path(values.get("directory", current["directory"])).expanduser().resolve())
+                Path(directory).mkdir(parents=True, exist_ok=True)
+                manager = ServerManager(directory)
+                properties = manager.get_server_properties()
+                properties["server-port"] = str(port)
+                manager.save_server_properties(properties)
+                values["server_port"] = port
+            profile = profiles.update(profile_id, values)
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "update_server", str(profile_id), server_id=profile_id)
@@ -391,10 +455,7 @@ def create_app(controller, database_path):
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
-        try:
-            properties = ServerManager(profile["directory"]).get_server_properties()
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        profile, properties = sync_server_port(profile)
         return {"profile": profile, "properties": properties}
 
     @app.put("/api/servers/{profile_id}/settings")
@@ -411,23 +472,24 @@ def create_app(controller, database_path):
         profile_values = payload.get("profile", {})
         if not isinstance(profile_values, dict):
             raise HTTPException(status_code=400, detail="伺服器設定格式錯誤")
+        profile_values = dict(profile_values)
         if any(key in profile_values for key in ("java_path", "min_memory", "max_memory")):
             require_server_permission(request, profile_id, "settings.edit_java")
         if any(key in profile_values for key in ("launcher", "auto_restart")):
             require_server_permission(request, profile_id, "settings.edit_startup")
         if not isinstance(properties, dict):
             raise HTTPException(status_code=400, detail="設定格式錯誤")
-        if "server-port" in properties:
-            try:
-                port = int(properties["server-port"])
-                if not 1 <= port <= 65535:
-                    raise ValueError
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="伺服器連接埠必須介於 1 到 65535") from exc
         try:
             before_properties = ServerManager(profile["directory"]).get_server_properties()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        properties = {**before_properties, **properties}
+        try:
+            port = validated_server_port(properties.get("server-port", profile.get("server_port", 25565)))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        properties["server-port"] = str(port)
+        profile_values["server_port"] = port
         before_profile = {key: profile.get(key) for key in profile_values}
         backup_manager = BackupManager(profile["directory"])
         try:
@@ -445,11 +507,12 @@ def create_app(controller, database_path):
                 profiles.update(profile_id, profile_values)
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        profile = profiles.get(profile_id)
         changes = {"properties": {key: {"from": before_properties.get(key), "to": str(value)} for key, value in properties.items() if before_properties.get(key) != str(value)},
                    "profile": {key: {"from": before_profile.get(key), "to": value} for key, value in profile_values.items() if before_profile.get(key) != value},
                    "snapshot": Path(snapshot).name}
         db.audit(user["user_id"], "update_settings", json.dumps(changes, ensure_ascii=False), server_id=profile_id)
-        return {"ok": True, "properties": ServerManager(profile["directory"]).get_server_properties()}
+        return {"ok": True, "profile": profile, "properties": ServerManager(profile["directory"]).get_server_properties()}
 
     @app.post("/api/servers/{profile_id}/java/auto")
     def auto_configure_java(profile_id: int, request: Request):
@@ -875,10 +938,28 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "files.edit")
         check_csrf(request, user)
         payload = await request.json()
+        path_value = str(payload.get("path", ""))
+        normalized_parts = [part for part in path_value.replace("\\", "/").split("/") if part not in {"", "."}]
+        is_root_properties = len(normalized_parts) == 1 and normalized_parts[0] == "server.properties"
+        content = str(payload.get("content", ""))
+        port = None
+        if is_root_properties:
+            parsed = {}
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    key, value = stripped.split("=", 1)
+                    parsed[key] = value
+            try:
+                port = validated_server_port(parsed.get("server-port", 25565))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
-            files.write_text(profile_id, payload.get("path", ""), str(payload.get("content", "")))
+            files.write_text(profile_id, path_value, content)
         except (PermissionError, ValueError, OSError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if is_root_properties:
+            profiles.update(profile_id, {"server_port": port})
         db.audit(user["user_id"], "edit_file", f"{profile_id}:{payload.get('path', '')}", server_id=profile_id)
         return {"ok": True}
 

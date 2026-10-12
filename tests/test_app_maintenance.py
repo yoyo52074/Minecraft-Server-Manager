@@ -145,6 +145,80 @@ class MaintenanceApiTests(unittest.TestCase):
         dashboard = self.client.get("/")
         self.assertIn("留空時會在程式資料夾", dashboard.text)
 
+    def test_create_server_persists_selected_port_to_properties_and_profile(self):
+        directory = Path(self.temp.name) / "custom-port-server"
+        response = self.client.post(
+            "/api/servers",
+            headers={"x-csrf-token": self.csrf},
+            json={"name": "Custom Port", "directory": str(directory), "core_type": "Paper", "server_port": 25601},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        profile = response.json()
+        self.assertEqual(profile["server_port"], 25601)
+        self.assertIn("server-port=25601", (directory / "server.properties").read_text(encoding="utf-8"))
+
+    def test_settings_port_change_updates_profile_properties_and_dashboard(self):
+        response = self.client.put(
+            f"/api/servers/{self.profile_id}/settings",
+            headers={"x-csrf-token": self.csrf},
+            json={"properties": {"server-port": "25602"}},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(data["profile"]["server_port"], 25602)
+        self.assertEqual(data["properties"]["server-port"], "25602")
+        self.assertEqual(self.app.state.profiles.get(self.profile_id)["server_port"], 25602)
+        servers = self.client.get("/api/servers").json()["servers"]
+        server = next(item for item in servers if item["id"] == self.profile_id)
+        self.assertEqual(server["server_port"], 25602)
+        dashboard = self.client.get("/")
+        self.assertIn('data-port>25602</span>', dashboard.text)
+        settings = self.client.get(f"/server/{self.profile_id}/settings")
+        self.assertIn('name="server-port" type="number" min="1" max="65535" value="25602"', settings.text)
+
+    def test_editing_server_properties_updates_profile_port(self):
+        response = self.client.put(
+            f"/api/servers/{self.profile_id}/files/text",
+            headers={"x-csrf-token": self.csrf},
+            json={"path": "server.properties", "content": "motd=updated\nserver-port=25603\n"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.app.state.profiles.get(self.profile_id)["server_port"], 25603)
+        server = next(item for item in self.client.get("/api/servers").json()["servers"] if item["id"] == self.profile_id)
+        self.assertEqual(server["server_port"], 25603)
+
+    def test_server_profile_port_patch_updates_properties_file(self):
+        response = self.client.patch(
+            f"/api/servers/{self.profile_id}",
+            headers={"x-csrf-token": self.csrf},
+            json={"server_port": 25604},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["server_port"], 25604)
+        self.assertIn("server-port=25604", (Path(self.server_dir) / "server.properties").read_text(encoding="utf-8"))
+
+    def test_invalid_server_port_is_rejected_without_changing_properties(self):
+        properties_path = Path(self.server_dir) / "server.properties"
+        before = properties_path.read_text(encoding="utf-8")
+        response = self.client.put(
+            f"/api/servers/{self.profile_id}/files/text",
+            headers={"x-csrf-token": self.csrf},
+            json={"path": "server.properties", "content": "server-port=70000\n"},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(properties_path.read_text(encoding="utf-8"), before)
+
+    def test_player_management_page_groups_features_in_tabs(self):
+        response = self.client.get(f"/server/{self.profile_id}/players")
+        self.assertEqual(response.status_code, 200, response.text[:500])
+        self.assertIn('role="tablist"', response.text)
+        self.assertIn('data-panel="activity"', response.text)
+        self.assertIn('data-panel="whitelist"', response.text)
+        self.assertIn('data-panel="moderation"', response.text)
+        self.assertIn('data-panel="ops"', response.text)
+        self.assertIn("封鎖管理", response.text)
+        self.assertIn("normaliseItem(raw)", response.text)
+
     def test_server_start_requires_explicit_eula_acceptance(self):
         (Path(self.server_dir) / "server.jar").write_bytes(b"placeholder")
         eula_path = Path(self.server_dir) / "eula.txt"

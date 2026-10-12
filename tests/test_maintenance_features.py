@@ -237,6 +237,19 @@ class HistoryAndAlertTests(unittest.TestCase):
         self.assertEqual(metrics["disk_used_gb"], 650.0)
         self.assertEqual(metrics["disk_total_gb"], 1000.0)
 
+    def test_cpu_sampler_reuses_process_and_caches_subsecond_queries(self):
+        manager = MultiServerManager(SimpleNamespace(db=None))
+        process = SimpleNamespace(pid=123, poll=lambda: None)
+        samples = iter((0.0, 64.0))
+        sampler = SimpleNamespace(cpu_percent=lambda interval=None: next(samples))
+        with patch("web_panel.multi_server.psutil") as fake_psutil, \
+             patch("web_panel.multi_server.time.monotonic", side_effect=(10.0, 10.5, 11.1)):
+            fake_psutil.Process.return_value = sampler
+            self.assertEqual(manager._sample_cpu_percent(7, process), 0.0)
+            self.assertEqual(manager._sample_cpu_percent(7, process), 0.0)
+            self.assertEqual(manager._sample_cpu_percent(7, process), 64.0)
+        fake_psutil.Process.assert_called_once_with(123)
+
     def test_memory_alert_uses_server_allocation_ratio(self):
         self.db.evaluate_metric_alerts(55, {"cpu_percent": 1, "memory_percent": 7.2,
                                              "memory_limit_percent": 95, "disk_used_percent": 10})
