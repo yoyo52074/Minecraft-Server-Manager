@@ -12,6 +12,7 @@ from backup_manager import BackupManager
 from core_metadata import CoreMetadata, minimum_java_version
 from server_manager import ServerManager
 from .multi_server import CoreAdapter
+from world_lock import WorldLockProbeError, is_world_locked
 
 
 DOWNLOAD_CORE_NAMES = {"Paper": "Paper", "Vanilla": "Vanilla (官方版)"}
@@ -34,6 +35,11 @@ class CoreUpdateJobs:
             raise ValueError("找不到伺服器")
         if core_type not in DOWNLOAD_CORE_NAMES:
             raise ValueError("網頁版核心更新目前支援 Paper 與 Vanilla；Forge/Fabric 請使用原安裝流程更新")
+        try:
+            if is_world_locked(profile["directory"]):
+                raise ValueError("世界存檔目前仍被 Java 程序鎖定；請先正常停止伺服器，不要刪除 session.lock")
+        except WorldLockProbeError as exc:
+            raise ValueError(str(exc)) from exc
         version = str(version or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,40}", version):
             raise ValueError("請輸入有效的 Minecraft 版本號")

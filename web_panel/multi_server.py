@@ -5,10 +5,12 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from core_metadata import minimum_java_version
+from world_lock import WorldLockProbeError, is_world_locked
 
 try:
     import psutil
@@ -17,6 +19,7 @@ except ImportError:  # pragma: no cover - optional until installed
 
 
 CORE_TYPES = {"Vanilla", "Paper", "Forge", "Fabric"}
+WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
 class CoreAdapter:
@@ -163,9 +166,27 @@ class CoreAdapter:
 
 
 class ServerProfileStore:
-    def __init__(self, db):
+    def __init__(self, db, default_directory=None):
         self.db = db
+        self.default_directory = Path(default_directory or Path(db.path).resolve().parent).expanduser().resolve()
         self._init_schema()
+
+    def _default_server_directory(self, name):
+        folder = unicodedata.normalize("NFKC", str(name))
+        folder = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", folder).strip(" .")
+        if not folder:
+            folder = "Minecraft Server"
+        if folder.split(".", 1)[0].casefold() in WINDOWS_DEVICE_NAMES:
+            folder = "_" + folder
+        used = {os.path.normcase(str(Path(item["directory"]).resolve())) for item in self.list()}
+        candidate_name = folder
+        suffix = 2
+        candidate = self.default_directory / candidate_name
+        while os.path.lexists(candidate) or os.path.normcase(str(candidate.resolve())) in used:
+            candidate_name = f"{folder} ({suffix})"
+            candidate = self.default_directory / candidate_name
+            suffix += 1
+        return candidate
 
     def _init_schema(self):
         with self.db._connect() as conn:
@@ -223,9 +244,11 @@ class ServerProfileStore:
 
     def create(self, name, directory, core_type, **values):
         name = name.strip()
-        directory = str(Path(directory).expanduser().resolve())
         if not name or len(name) > 80:
             raise ValueError("伺服器名稱必須為 1 到 80 個字元")
+        if not str(directory or "").strip():
+            directory = self._default_server_directory(name)
+        directory = str(Path(directory).expanduser().resolve())
         if core_type not in CORE_TYPES:
             raise ValueError("不支援的伺服器核心")
         Path(directory).mkdir(parents=True, exist_ok=True)
@@ -438,6 +461,11 @@ class MultiServerManager:
             current = self._processes.get(profile_id)
             if current and current.poll() is None:
                 return False, "伺服器已經在運行中"
+            try:
+                if is_world_locked(profile["directory"]):
+                    return False, "世界存檔目前已被鎖定，可能已有另一個 Java 伺服器程序正在使用。請先正常停止該程序；不要刪除 session.lock。"
+            except WorldLockProbeError as exc:
+                return False, str(exc)
             adapter = CoreAdapter(profile["core_type"])
             launcher = adapter.find_launcher(Path(profile["directory"]), profile.get("launcher"))
             if not launcher:
@@ -502,13 +530,13 @@ class MultiServerManager:
         try:
             if force:
                 process.kill()
+                return True, "已強制結束伺服器程序"
             else:
                 process.stdin.write("stop\n")
                 process.stdin.flush()
-                process.wait(timeout=15)
-        except (OSError, subprocess.TimeoutExpired):
-            process.kill()
-        return True, "已送出停止要求"
+                return True, "已送出正常停止要求；等待世界存檔與 Java 程序完全結束"
+        except (OSError, BrokenPipeError) as exc:
+            return False, f"無法送出停止指令：{exc}；伺服器仍可能在運行，請確認狀態後再操作"
 
     def send_command(self, profile_id, command):
         profile = self.store.get(profile_id)

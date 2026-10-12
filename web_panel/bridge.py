@@ -62,8 +62,15 @@ class ServerBridge:
         ok, message = self.stop()
         if not ok:
             return self.start()
-        self.controller.root.after(1500, self.controller.start_server)
-        return True, "已送出重啟要求"
+        self.controller.root.after(250, self._start_after_server_exit)
+        return True, "已送出重啟要求；待世界存檔完成且舊 Java 程序結束後再啟動"
+
+    def _start_after_server_exit(self):
+        process = self.controller.server_process
+        if process and process.poll() is None:
+            self.controller.root.after(250, self._start_after_server_exit)
+            return
+        self.controller.root.after(100, self.controller.start_server)
 
     def send_command(self, command):
         command = command.strip()

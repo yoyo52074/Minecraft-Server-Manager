@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from fastapi.testclient import TestClient
 from web_panel.app import create_app
+from web_panel.bridge import ServerBridge
 from web_panel.java_runtime import JavaRuntimeJobs
 
 
@@ -64,6 +65,45 @@ class MaintenanceApiTests(unittest.TestCase):
         self.app.state.monitor.stop()
         self.temp.cleanup()
 
+    def test_legacy_restart_waits_for_old_server_process_to_exit(self):
+        class FakeRoot:
+            def __init__(self):
+                self.pending = []
+
+            def after(self, delay, callback, *args):
+                self.pending.append((delay, callback, args))
+
+        class FakeProcess:
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        controller = FakeController(self.server_dir)
+        controller.root = FakeRoot()
+        controller.start_server = lambda: started.append(True)
+        controller.stop_server = lambda: None
+        controller.server_process = FakeProcess()
+        started = []
+        bridge = ServerBridge(controller)
+
+        ok, message = bridge.restart()
+        self.assertTrue(ok)
+        self.assertIn("舊 Java 程序結束", message)
+        self.assertEqual(controller.root.pending[-1][0], 250)
+        delay, callback, args = controller.root.pending.pop()
+        callback(*args)
+        self.assertFalse(started)
+        self.assertEqual(controller.root.pending[-1][0], 250)
+
+        controller.root.pending.clear()
+        controller.server_process.returncode = 0
+        bridge._start_after_server_exit()
+        self.assertEqual(controller.root.pending[-1][0], 100)
+        delay, callback, args = controller.root.pending.pop()
+        callback(*args)
+        self.assertEqual(started, [True])
+
     def test_history_monitor_and_backup_pages_render(self):
         for path in (f"/server/{self.profile_id}/history", f"/server/{self.profile_id}/monitor", f"/server/{self.profile_id}/backups"):
             response = self.client.get(path)
@@ -85,8 +125,41 @@ class MaintenanceApiTests(unittest.TestCase):
         for path in (f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/settings"):
             self.assertIn(f'href="{path}"',header)
         self.assertNotIn("Java 管理",response.text)
+        self.assertIn("pollAutoCoreInstall", response.text)
+        self.assertIn("強制停止會立即終止 Java", response.text)
         self.assertEqual(self.client.get("/java").status_code,404)
         self.assertEqual(self.client.get("/api/java").status_code,404)
+
+    def test_create_server_with_blank_directory_uses_app_folder_and_name(self):
+        response = self.client.post(
+            "/api/servers",
+            headers={"x-csrf-token": self.csrf},
+            json={"name": "Auto Paper", "directory": "", "core_type": "Paper", "minecraft_version": "1.21.4"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        expected = Path(self.temp.name) / "Auto Paper"
+        self.assertEqual(Path(response.json()["directory"]), expected)
+        self.assertTrue(expected.is_dir())
+        dashboard = self.client.get("/")
+        self.assertIn("留空時會在程式資料夾", dashboard.text)
+
+    def test_start_without_paper_core_automatically_queues_install(self):
+        profile = self.app.state.profiles.create(
+            "Empty Paper", Path(self.temp.name) / "Empty Paper", "Paper", minecraft_version="1.21.4"
+        )
+        with patch.object(self.app.state.multi, "start", return_value=(False, "找不到伺服器啟動檔，請先上傳或安裝核心")), \
+             patch.object(self.app.state.core_updates, "start", return_value="install-job") as install:
+            response = self.client.post(
+                f"/api/servers/{profile['id']}/start",
+                headers={"x-csrf-token": self.csrf},
+                json={},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["core_install_job_id"], "install-job")
+        self.assertIn("安裝完成後會自動啟動", data["message"])
+        install.assert_called_once_with(profile["id"], "Paper", "1.21.4")
 
     def test_dashboard_has_safe_server_remove_action(self):
         response=self.client.get("/")

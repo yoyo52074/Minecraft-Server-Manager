@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -13,6 +15,7 @@ from web_panel.file_service import SafeFileService
 from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
 from web_panel.core_update import CoreUpdateJobs
 from core_metadata import minimum_java_version
+from world_lock import is_world_locked
 
 
 class WebPanelServiceTests(unittest.TestCase):
@@ -31,6 +34,23 @@ class WebPanelServiceTests(unittest.TestCase):
         launcher = CoreAdapter("Fabric").find_launcher(directory)
         self.assertEqual(launcher.name, "fabric-server-launch.jar")
         self.assertEqual(profile["core_type"], "Fabric")
+
+    def test_empty_directory_defaults_to_named_app_folder_without_overwrite(self):
+        first = self.store.create("My Server", "", "Paper")
+        second = self.store.create("My Server", "", "Paper")
+        base = Path(self.db.path).resolve().parent
+        self.assertEqual(Path(first["directory"]), base / "My Server")
+        self.assertEqual(Path(second["directory"]), base / "My Server (2)")
+        self.assertTrue(Path(first["directory"]).is_dir())
+        self.assertTrue(Path(second["directory"]).is_dir())
+
+    def test_default_server_folder_name_is_windows_safe(self):
+        reserved = self.store.create("CON", "", "Paper")
+        invalid = self.store.create("CON: Server/Alpha", "", "Paper")
+        self.assertEqual(Path(reserved["directory"]).name, "_CON")
+        folder = Path(invalid["directory"]).name
+        self.assertNotIn(":", folder)
+        self.assertNotIn("/", folder)
 
     def test_minecraft_java_requirements(self):
         self.assertEqual(minimum_java_version("1.20.4"), 17)
@@ -51,6 +71,87 @@ class WebPanelServiceTests(unittest.TestCase):
         self.assertIn("Java 25", message)
         self.assertIn("Java 21", message)
         popen.assert_not_called()
+
+    def test_world_session_lock_blocks_start_but_stale_lock_file_does_not(self):
+        directory = Path(self.temp.name) / "locked-world"
+        profile = self.store.create("Locked world", directory, "Paper", minecraft_version="1.21.4")
+        (directory / "server.jar").write_bytes(b"placeholder")
+        world = directory / "world"
+        world.mkdir()
+        lock_file = world / "session.lock"
+        lock_file.write_bytes(b"\0" * 8)
+        self.assertFalse(is_world_locked(directory), "stale lock file without an OS lock is safe to reuse")
+
+        lock_holder = r"""
+import fcntl, os, sys, time
+f = open(sys.argv[1], 'r+b')
+f.seek(0)
+if os.name == 'nt':
+    import msvcrt
+    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+else:
+    fcntl.lockf(f.fileno(), fcntl.LOCK_EX)
+print('ready', flush=True)
+time.sleep(30)
+"""
+        if os.name == "nt":
+            lock_holder = lock_holder.replace("import fcntl, os, sys, time", "import os, sys, time")
+        holder = subprocess.Popen([sys.executable, "-c", lock_holder, str(lock_file)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "ready")
+            self.assertTrue(is_world_locked(directory))
+            manager = MultiServerManager(self.store)
+            with patch("web_panel.multi_server.subprocess.Popen") as start_process:
+                ok, message = manager.start(profile["id"])
+            self.assertFalse(ok)
+            self.assertIn("世界存檔", message)
+            start_process.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "世界存檔"):
+                CoreUpdateJobs(self.store, manager).start(profile["id"], "Paper", "1.21.4")
+            self.assertFalse((directory / "backups").exists())
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
+            holder.stdout.close()
+            holder.stderr.close()
+        self.assertFalse(is_world_locked(directory))
+
+    def test_normal_stop_never_kills_process_automatically(self):
+        profile = self.store.create("Stop safety", Path(self.temp.name) / "stop-safety", "Paper")
+
+        class FakeStdin:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+            def flush(self):
+                pass
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.killed = False
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.killed = True
+
+        manager = MultiServerManager(self.store)
+        process = FakeProcess()
+        manager._processes[profile["id"]] = process
+        ok, message = manager.stop(profile["id"])
+        self.assertTrue(ok)
+        self.assertIn("等待世界存檔", message)
+        self.assertEqual(process.stdin.writes, ["stop\n"])
+        self.assertFalse(process.killed)
+        ok, message = manager.stop(profile["id"], force=True)
+        self.assertTrue(ok)
+        self.assertTrue(process.killed)
 
     def test_core_update_creates_backup_archives_old_jar_and_updates_profile(self):
         directory=Path(self.temp.name)/"core-update"
@@ -84,6 +185,31 @@ class WebPanelServiceTests(unittest.TestCase):
         self.assertTrue(any((directory/"backups"/"cores").glob("*-old-paper.jar")))
         self.assertTrue(any((directory/"backups").glob("backup-*.zip")))
         self.assertEqual(json.loads((directory/"core-info.json").read_text(encoding="utf-8"))["java_required"],25)
+
+    def test_core_job_installs_into_an_empty_server_directory(self):
+        directory = Path(self.temp.name) / "empty-install"
+        profile = self.store.create("Empty install", directory, "Paper", minecraft_version="1.21.4")
+        manager = MultiServerManager(self.store)
+        jobs = CoreUpdateJobs(self.store, manager)
+
+        def fake_download(core, version, progress):
+            path = directory / f"paper-{version}.jar"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("version.txt", version)
+            progress(100)
+            return str(path), "downloaded"
+
+        with patch("web_panel.core_update.ServerManager.download_server", side_effect=fake_download):
+            job_id = jobs.start(profile["id"], "Paper", "1.21.4")
+            for _ in range(300):
+                job = jobs.get(job_id, profile["id"])
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(job["status"], "completed", job)
+        self.assertTrue((directory / "paper-1.21.4.jar").is_file())
+        self.assertEqual(self.store.get(profile["id"])["launcher"], "paper-1.21.4.jar")
+        self.assertTrue(any((directory / "backups").glob("backup-*.zip")))
 
     def test_file_service_rejects_path_traversal(self):
         profile = self.store.create("Paper", Path(self.temp.name) / "paper", "Paper")

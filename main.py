@@ -19,6 +19,7 @@ from diagnostics import ServerDiagnostics
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, COLORS
 from web_panel.app import create_app
 from web_panel.bridge import ServerBridge
+from world_lock import WorldLockProbeError, is_world_locked
 
 
 class ApplicationController:
@@ -62,6 +63,9 @@ class ApplicationController:
         )
         self.java_major_version = 0
         self.server_process = None
+        self._server_output_thread = None
+        self._closing_after_stop = False
+        self._close_wait_started = None
         self.playit_process = None
         self.server_started_at = None
         if getattr(sys, "frozen", False):
@@ -624,6 +628,19 @@ class ApplicationController:
         )
         if metadata_version and required_java < int(metadata.get("java_required") or 0):
             required_java = int(metadata["java_required"])
+        properties = self.server_manager.get_server_properties()
+        try:
+            if is_world_locked(self.server_directory):
+                messagebox.showerror(
+                    "世界存檔已鎖定",
+                    "這個世界目前正由另一個 Minecraft Java 程序使用。\n\n"
+                    "請先回到原本啟動伺服器的視窗，使用正常停止；確認程序完全結束後再啟動。\n"
+                    "請勿刪除 session.lock，否則可能造成世界存檔損壞。",
+                )
+                return
+        except WorldLockProbeError as exc:
+            messagebox.showerror("無法檢查世界存檔", str(exc))
+            return
         verified, verification_detail = self.core_metadata.verify(server_jar_path)
         if not verified:
             messagebox.showerror(
@@ -641,7 +658,6 @@ class ApplicationController:
             else:
                 self.set_status(f"需要 Java {required_java} 才能啟動")
             return
-        properties = self.server_manager.get_server_properties()
         diagnostics = self.diagnostics.check(
             self.java_major_version,
             required_java,
@@ -683,10 +699,16 @@ class ApplicationController:
         )
         self.root.start_button.config(state="disabled")
         self.root.stop_button.config(state="normal")
-        threading.Thread(target=self.read_server_output, daemon=True).start()
+        self._server_output_thread = threading.Thread(
+            target=self.read_server_output, args=(self.server_process,), daemon=True
+        )
+        self._server_output_thread.start()
 
-    def read_server_output(self):
-        for line in iter(self.server_process.stdout.readline, ""):
+    def read_server_output(self, process=None):
+        process = process or self.server_process
+        if not process:
+            return
+        for line in iter(process.stdout.readline, ""):
             clean_line = line.strip()
             self.root.after(0, self.log, clean_line)
             if "Done" in clean_line:
@@ -709,7 +731,7 @@ class ApplicationController:
                         "========================================\n", "success"
                     ),
                 )
-        self.root.after(0, self.server_stopped_ui_update)
+        self.root.after(0, self.server_stopped_ui_update, process)
 
     def server_started_ui_update(self):
         self.server_started_at = time.time()
@@ -721,7 +743,9 @@ class ApplicationController:
         self.root.command_input.config(state="normal")
         self.root.send_command_button.config(state="normal")
 
-    def server_stopped_ui_update(self):
+    def server_stopped_ui_update(self, process=None):
+        if process is not None and self.server_process is not process:
+            return
         self.stop_and_reset_progress(0)
         self.set_status("伺服器已停止")
         self.root.status_detail_label.config(text="伺服器已停止，可以重新啟動")
@@ -746,12 +770,42 @@ class ApplicationController:
             messagebox.showinfo("提示", "伺服器未在運行中。")
 
     def on_closing(self):
+        if self._closing_after_stop:
+            return
         if self.server_process and self.server_process.poll() is None:
             if not messagebox.askyesno("確認", "伺服器仍在運行中，確定要關閉嗎？"):
                 return
+            self._closing_after_stop = True
+            self._close_wait_started = time.monotonic()
             self.stop_server()
-            self.root.after(3000, self.root.destroy)
+            self.root.after(250, self._wait_for_server_shutdown)
             return
+        self._finish_application_close()
+
+    def _wait_for_server_shutdown(self):
+        process = self.server_process
+        output_thread = self._server_output_thread
+        still_running = bool(process and process.poll() is None)
+        output_pending = bool(output_thread and output_thread.is_alive())
+        if still_running or output_pending:
+            elapsed = time.monotonic() - (self._close_wait_started or time.monotonic())
+            if elapsed >= 120:
+                should_continue = messagebox.askyesno(
+                    "伺服器仍在儲存世界",
+                    "伺服器已收到正常停止要求，但 Java 程序尚未完全結束。\n\n"
+                    "繼續等待可避免世界存檔損壞；若選「否」，只會取消關閉管理器，"
+                    "不會強制結束伺服器。",
+                )
+                if not should_continue:
+                    self._closing_after_stop = False
+                    self._close_wait_started = None
+                    return
+                self._close_wait_started = time.monotonic()
+            self.root.after(250, self._wait_for_server_shutdown)
+            return
+        self._finish_application_close()
+
+    def _finish_application_close(self):
         if self.playit_process:
             self.stop_playit_tunnel()
         self.stop_web_panel()

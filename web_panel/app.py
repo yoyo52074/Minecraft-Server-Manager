@@ -473,7 +473,12 @@ def create_app(controller, database_path):
 
     @app.get("/api/servers/{profile_id}/core-update/{job_id}")
     def core_update_status(profile_id: int, job_id: str, request: Request):
-        require_server_permission(request, profile_id, "settings.view")
+        user = require_user(request)
+        if not profiles.get(profile_id):
+            raise HTTPException(status_code=404, detail="找不到伺服器")
+        if not (db.has_server_permission(user, profile_id, "settings.view")
+                or db.has_server_permission(user, profile_id, "server.start")):
+            raise HTTPException(status_code=403, detail="缺少檢視伺服器或啟動伺服器權限")
         job = core_updates.get(job_id, profile_id)
         if not job:
             raise HTTPException(status_code=404, detail="找不到核心更新工作")
@@ -1067,6 +1072,26 @@ def create_app(controller, database_path):
         check_csrf(request, user)
         actions = {"start": multi.start, "stop": multi.stop, "force-stop": lambda value: multi.stop(value, True)}
         ok, message = actions[action](profile_id)
+        if action == "start" and not ok and message == "找不到伺服器啟動檔，請先上傳或安裝核心":
+            profile = profiles.get(profile_id)
+            version = str((profile or {}).get("minecraft_version") or "").strip()
+            if profile and profile["core_type"] not in {"Paper", "Vanilla"}:
+                message = "此核心目前無法由網頁面板自動安裝；請先使用對應的 Forge/Fabric 安裝流程安裝核心。"
+            elif not version:
+                message = "伺服器尚未設定 Minecraft 版本；請先在伺服器設定填入版本，再按啟動即可自動安裝核心。"
+            elif not db.has_server_permission(user, profile_id, "settings.edit_startup"):
+                message = "目前帳號沒有核心安裝權限；請管理員授予伺服器啟動設定權限，或由管理員執行啟動。"
+            else:
+                try:
+                    job_id = core_updates.start(profile_id, profile["core_type"], version)
+                    db.audit(user["user_id"], "auto_install_core", f"{profile_id}:{profile['core_type']}:{version}", server_id=profile_id)
+                    return {
+                        "ok": False,
+                        "core_install_job_id": job_id,
+                        "message": f"找不到核心，已自動開始安裝 {profile['core_type']} {version}；安裝完成後會自動啟動伺服器。",
+                    }
+                except ValueError as exc:
+                    message = str(exc)
         db.audit(user["user_id"], f"server_{action}", str(profile_id), server_id=profile_id)
         required_match = re.search(r"需要 Java (\d+)", message) if action == "start" and not ok else None
         if required_match and db.has_server_permission(user, profile_id, "settings.edit_java"):

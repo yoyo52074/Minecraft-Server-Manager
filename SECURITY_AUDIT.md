@@ -6,9 +6,9 @@
 
 ## 結論
 
-找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理及設定檔寫入問題。修補後 **86 項測試通過**；Bandit 掃描 **6,129 行：High 0、Medium 0、Low 19**；pip-audit 回報 **No known vulnerabilities found**。
+找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **94 項測試通過**；Bandit 掃描 **6,326 行：High 0、Medium 0、Low 19**；pip-audit 回報 **No known vulnerabilities found**。
 
-這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。安全修補版 Windows EXE 已由 GitHub Actions 成功建置並通過啟動 Smoke Test（Run `38184656310`；程式 commit `ea78eb721bff0e587a0feca9d65965286a50bceb`）。
+這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。前一版安全修補曾由 GitHub Actions 建置並通過 Smoke Test（Run `38184656310`；commit `ea78eb721bff0e587a0feca9d65965286a50bceb`）；但該產物**不包含本輪的世界鎖、關閉流程及空目錄安裝修正**。目前工作階段的 GitHub 授權未啟用，推送新 commit 被拒，因此這輪尚無新的 Windows EXE CI 結果。
 
 ## 修補摘要
 
@@ -26,15 +26,18 @@
 | 中 | Java 不足時伺服器無法啟動；POSIX Forge `run.sh` 曾被當作 JAR 啟動。 | Java 不足會搜尋／下載符合版本後重試；Forge `.sh` 在 POSIX 以 `/bin/sh` argv 啟動，Windows 明確拒絕 POSIX 腳本；未使用 `shell=True`。 |
 | 低 | metrics、玩家查詢及 profile 更新曾使用動態 SQL 字串。 | 改用固定 SQL 與參數繫結。 |
 | 低 | 總覽頁有多餘核心支援標語。 | 已移除並由測試覆蓋。 |
+| 中 | 管理器關閉時固定等待 3 秒、Web 停止時 15 秒後自動 kill，可能在 Paper 世界存檔仍進行時關閉／殺掉 Java，留下持鎖程序或造成世界損壞。 | 桌面關閉改為等待 Java 與輸出執行緒結束；Web 正常停止不再自動強制終止；重啟等待舊程序退出；啟動與核心更新前以 OS file lock 檢查世界 `session.lock`，提示使用者勿刪鎖檔。 |
+| 低 | 新伺服器未指定路徑時可能解析到目前工作目錄，空目錄啟動也只回報找不到核心。 | 空路徑改在程式資料夾建立安全化的伺服器名稱目錄；Paper/Vanilla 空目錄啟動會先建立備份、下載／安裝核心，再自動重試啟動。 |
 
 ## 驗證結果
 
 - Python 語法編譯：本輪修改模組通過。
-- `python -m unittest discover -s tests -v`：**86 項通過**。
-- Bandit：**6,129 行；High 0、Medium 0、Low 19**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
+- `python -m unittest discover -s tests -v`：**94 項通過**。
+- Bandit：**6,326 行；High 0、Medium 0、Low 19**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
 - pip-audit：**No known vulnerabilities found**。
-- GitHub Actions Windows EXE build：**成功**，包含 EXE 驗證與啟動 Smoke Test；產物為 PE32+ x86-64，大小 **33,645,308 bytes**，SHA-256：`d3bc01eff27eb3e759676d1c7bbd761ead0e0ba4b02061a3fc09e140437f3ae9`。
+- 前一版 Windows EXE（不含本輪修改）：GitHub Actions 驗證成功，PE32+ x86-64，大小 **33,645,308 bytes**，SHA-256：`d3bc01eff27eb3e759676d1c7bbd761ead0e0ba4b02061a3fc09e140437f3ae9`。本輪 commit 尚待推送並執行 Windows CI，不能用此舊 EXE 代替。
 - 本機安全案例包含：無效 ZIP 衝突策略拒絕、ZIP staging 失敗不半套覆寫、備份還原 commit 失敗回滾、Windows 大小寫重複路徑拒絕、上傳超額／過期／final 清理、properties symlink 拒絕、profile 刪除後的 API／WebSocket 撤銷。
+- 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設。
 
 ## 部署與剩餘風險
 
