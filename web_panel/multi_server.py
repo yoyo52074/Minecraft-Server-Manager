@@ -9,7 +9,7 @@ import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from core_metadata import minimum_java_version, java_version_compatible
+from core_metadata import java_requirement_for_core, java_version_compatible
 from world_lock import WorldLockProbeError, is_world_locked
 
 try:
@@ -32,15 +32,26 @@ class CoreAdapter:
         if self.core_type == "Fabric":
             return ["fabric-server-launch.jar", "server.jar"]
         if self.core_type == "Forge":
-            return ["run.bat", "run.sh", "server.jar", "forge-server.jar"]
+            return ["run.bat", "run.sh", "forge-server.jar"]
         if self.core_type == "Paper":
             return ["paper.jar", "server.jar"]
         return ["server.jar", "minecraft_server.jar"]
 
     def find_launcher(self, directory: Path, configured: str | None = None):
         directory = Path(directory).resolve()
-        candidates = [configured] if configured else []
-        candidates.extend(self.candidate_launchers())
+        if self.core_type == "Forge":
+            candidates = [name for name in (configured,) if name in {"run.bat", "run.sh"}]
+            candidates.extend(["run.bat", "run.sh", "forge-server.jar"])
+            candidates.extend(
+                path.name for path in sorted(directory.glob("forge-*.jar"))
+                if "installer" not in path.name.casefold()
+            )
+            if configured:
+                candidates.append(configured)
+            candidates.append("server.jar")
+        else:
+            candidates = [configured] if configured else []
+            candidates.extend(self.candidate_launchers())
 
         def safe_candidate(name):
             raw = str(name or "")
@@ -62,6 +73,11 @@ class CoreAdapter:
             if candidate:
                 return candidate
         jars = sorted(directory.glob("*.jar"))
+        if self.core_type == "Forge":
+            forge_jars = [path for path in jars
+                          if "forge" in path.name.casefold() and "installer" not in path.name.casefold()]
+            if forge_jars:
+                jars = forge_jars
         return safe_candidate(jars[0].name) if jars else None
 
     def command(self, profile: dict, java_path=None):
@@ -106,7 +122,7 @@ class CoreAdapter:
                 match = re.search(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)", launcher.name)
                 if match:
                     version = match.group(1)
-        required = minimum_java_version(version)
+        required = java_requirement_for_core(profile.get("core_type"), version)
         return required, str(version or "未知版本")
 
     @staticmethod

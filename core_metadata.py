@@ -49,6 +49,15 @@ def java_version_compatible(required_major, installed_major):
     return installed_major == required_major if required_major <= 16 else installed_major >= required_major
 
 
+def java_requirement_for_core(core_type, minecraft_version):
+    """Return the runtime target for a core, including legacy Forge's Java 8 constraint."""
+    numbers = [int(value) for value in re.findall(r"\d+", str(minecraft_version or ""))[:2]]
+    if str(core_type or "").casefold() == "forge" and len(numbers) >= 2:
+        if numbers[0] == 1 and numbers[1] <= 12:
+            return 8
+    return minimum_java_version(minecraft_version)
+
+
 class CoreMetadata:
     FILENAME = "core-info.json"
 
@@ -92,4 +101,4 @@ class CoreMetadata:
         return actual.lower() == expected.lower(), actual
 
 
-__all__ = ["CoreMetadata", "minimum_java_version", "java_version_compatible"]
+__all__ = ["CoreMetadata", "minimum_java_version", "java_version_compatible", "java_requirement_for_core"]

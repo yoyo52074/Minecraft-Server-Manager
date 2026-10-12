@@ -14,7 +14,7 @@ import tkinter as tk
 
 from server_manager import ServerManager
 from backup_manager import BackupManager
-from core_metadata import CoreMetadata, minimum_java_version, java_version_compatible
+from core_metadata import CoreMetadata, minimum_java_version, java_version_compatible, java_requirement_for_core
 from diagnostics import ServerDiagnostics
 from ui_components import MainAppWindow, ServerSettingsWindow, AboutWindow, COLORS
 from web_panel.app import create_app
@@ -421,7 +421,7 @@ class ApplicationController:
                             core,
                             version,
                             os.path.basename(filepath),
-                            self.get_required_java_version_for_version(version),
+                            self.get_required_java_version_for_version(version, core),
                             self.core_metadata.sha256(filepath),
                         )
                     except OSError as exc:
@@ -449,6 +449,20 @@ class ApplicationController:
         self.root.after(0, self.update_progress, progress)
 
     def handle_forge_installation(self, installer_path):
+        metadata = self.core_metadata.load()
+        version = metadata.get("minecraft_version") or self.root.version_combo.get().strip()
+        required_java = self.get_required_java_version_for_version(version, "Forge")
+        if not self.ensure_java_version(required_java):
+            if not messagebox.askyesno(
+                "Forge 需要相容的 Java",
+                f"Forge {version} 需要 Java {required_java}。是否自動下載後繼續安裝？",
+            ):
+                self._auto_start_after_download = False
+                self.root.start_button.config(state="normal")
+                return
+            self._pending_forge_installer = installer_path
+            self.download_java(required_java, start_after=False)
+            return
         self.set_status("Forge 需要安裝...")
         self.log("請在彈出的 Forge 安裝程式中，點擊 'Install Server'。", "warn")
         install_command = [self.java_executable_path, "-jar", installer_path]
@@ -459,12 +473,11 @@ class ApplicationController:
                     install_command,
                     cwd=self.server_manager.server_directory,
                     check=True,
+                    creationflags=self.get_creation_flags(),
                 )
                 self.root.after(0, self.setup_eula_and_finish)
             except Exception as e:
-                self.root.after(
-                    0, lambda: messagebox.showerror("錯誤", f"Forge 安裝失敗: {e}")
-                )
+                self.root.after(0, lambda: messagebox.showerror("錯誤", f"Forge 安裝失敗: {e}"))
                 self.root.after(0, lambda: self.set_status("Forge 安裝失敗"))
 
         threading.Thread(target=_run_installer, daemon=True).start()
@@ -522,11 +535,18 @@ class ApplicationController:
             self.update_server_info()
 
     def get_server_jars(self):
-        return [
-            os.path.join(self.server_manager.server_directory, name)
-            for name in sorted(os.listdir(self.server_manager.server_directory))
-            if name.endswith(".jar") and "installer" not in name.lower()
+        directory = self.server_manager.server_directory
+        names = [
+            name for name in sorted(os.listdir(directory))
+            if name.lower().endswith(".jar") and "installer" not in name.lower()
         ]
+        metadata = self.core_metadata.load()
+        core_type = str(metadata.get("core") or self.root.core_combo.get() or "").strip()
+        if core_type.casefold() == "forge":
+            forge_names = [name for name in names if "forge" in name.casefold()]
+            if forge_names:
+                names = forge_names
+        return [os.path.join(directory, name) for name in names]
 
     def is_eula_accepted(self):
         eula_path = os.path.join(self.server_manager.server_directory, "eula.txt")
@@ -621,10 +641,11 @@ class ApplicationController:
             selected_version = self.root.version_combo.get().strip()
             if selected_version and "載入中" not in selected_version:
                 metadata_version = selected_version
+        metadata_core = metadata.get("core") or self.root.core_combo.get().strip()
         required_java = (
-            self.get_required_java_version_for_version(metadata_version)
+            self.get_required_java_version_for_version(metadata_version, metadata_core)
             if metadata_version
-            else self.get_required_java_version(server_jar_path)
+            else self.get_required_java_version(server_jar_path, metadata_core)
         )
         properties = self.server_manager.get_server_properties()
         try:
@@ -868,7 +889,7 @@ class ApplicationController:
             if executable != "java" and not os.path.exists(executable):
                 continue
             major = self.get_java_major_version(executable)
-            if major >= required_version:
+            if java_version_compatible(required_version, major):
                 self.java_executable_path = executable
                 self.java_major_version = major
                 self.embedded_java_path = (
@@ -877,15 +898,15 @@ class ApplicationController:
                 return True
         return False
 
-    def get_required_java_version(self, server_jar_path):
+    def get_required_java_version(self, server_jar_path, core_type=None):
         name = os.path.basename(server_jar_path)
         versions = re.findall(r"(?<!\d)(\d+\.\d+(?:\.\d+)?)(?!\d)", name)
         if not versions:
-            return 17
-        return self.get_required_java_version_for_version(versions[0])
+            return java_requirement_for_core(core_type, None)
+        return java_requirement_for_core(core_type, versions[0])
 
-    def get_required_java_version_for_version(self, version):
-        return minimum_java_version(version)
+    def get_required_java_version_for_version(self, version, core_type=None):
+        return java_requirement_for_core(core_type, version)
 
     def download_java(self, java_major=17, start_after=False):
         """Download Java once at a time, then optionally retry the pending start."""
@@ -981,20 +1002,26 @@ class ApplicationController:
                 self.root.after(
                     0,
                     self._finish_java_download,
-                    download_succeeded and start_after,
+                    download_succeeded and start_after, download_succeeded,
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _finish_java_download(self, start_after=False):
-        """Restore the UI after a Java download has finished or failed."""
+    def _finish_java_download(self, start_after=False, download_succeeded=False):
+        """Restore the UI and resume any pending Forge installer after Java setup."""
         self._java_download_in_progress = False
         self.stop_and_reset_progress(0)
-        if start_after:
+        pending_installer = getattr(self, "_pending_forge_installer", None)
+        if pending_installer:
+            self._pending_forge_installer = None
+            if download_succeeded:
+                self.root.after(0, self.handle_forge_installation, pending_installer)
+            else:
+                self._auto_start_after_download = False
+        elif start_after:
             self.root.after(0, self.start_server)
         elif not (self.server_process and self.server_process.poll() is None):
             self.root.start_button.config(state="normal")
-
 
 def show_simplified_launcher(root, app):
     """Show only Web panel status by default; full Tk UI remains --legacy-ui."""

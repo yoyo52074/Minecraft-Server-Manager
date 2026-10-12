@@ -14,7 +14,7 @@ from web_panel.database import WebDatabase
 from web_panel.file_service import SafeFileService
 from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
 from web_panel.core_update import CoreUpdateJobs
-from core_metadata import minimum_java_version
+from core_metadata import java_requirement_for_core, minimum_java_version
 from world_lock import is_world_locked
 
 
@@ -63,6 +63,32 @@ class WebPanelServiceTests(unittest.TestCase):
         self.assertEqual(minimum_java_version("1.21.4"), 21)
         self.assertEqual(minimum_java_version("26.1"), 25)
         self.assertEqual(minimum_java_version("27.0"), 25)
+
+    def test_forge_pre_113_requires_java8_while_paper_112_uses_java11(self):
+        self.assertEqual(java_requirement_for_core("Forge", "1.12.2"), 8)
+        self.assertEqual(java_requirement_for_core("Forge", "1.7.10"), 8)
+        self.assertEqual(java_requirement_for_core("Paper", "1.12.2"), 11)
+        profile = self.store.create(
+            "Forge 1.12.2", Path(self.temp.name) / "forge-1122", "Forge",
+            minecraft_version="1.12.2", java_path="java",
+        )
+        required, version = CoreAdapter.required_java_version(profile)
+        self.assertEqual((required, version), (8, "1.12.2"))
+        with patch.object(CoreAdapter, "java_major_version", return_value=11):
+            with self.assertRaisesRegex(ValueError, "需要 Java 8"):
+                CoreAdapter.resolve_java(profile, required, version)
+
+    def test_forge_launcher_prefers_forge_jar_over_server_jar(self):
+        directory = Path(self.temp.name) / "forge-launcher-order"
+        directory.mkdir()
+        (directory / "server.jar").write_bytes(b"vanilla")
+        (directory / "forge-1.12.2-14.23.5.2864-universal.jar").write_bytes(b"forge")
+        profile = self.store.create(
+            "Forge launcher", directory, "Forge", minecraft_version="1.12.2",
+            launcher="server.jar",
+        )
+        launcher = CoreAdapter("Forge").find_launcher(directory, profile["launcher"])
+        self.assertEqual(launcher.name, "forge-1.12.2-14.23.5.2864-universal.jar")
 
     def test_profile_minecraft_version_overrides_stale_core_metadata_java_target(self):
         directory = Path(self.temp.name) / "stale-java-metadata"
@@ -383,6 +409,62 @@ time.sleep(30)
         self.assertEqual(java_path, r"C:\\Java\\bin\\java.exe")
         self.assertEqual(java_runtime.request, (profile["id"], 17, 42, False))
         self.assertEqual(self.store.get(profile["id"])["java_path"], java_path)
+
+    def test_forge_1122_install_auto_prepares_java8(self):
+        profile = self.store.create(
+            "Forge 1.12.2 Java", Path(self.temp.name) / "forge-1122-java", "Forge",
+            minecraft_version="1.12.2",
+        )
+
+        class FakeJavaRuntime:
+            request = None
+
+            def start(self, server_id, required, actor_id, start_after=False):
+                self.request = (server_id, required, actor_id, start_after)
+                return "java8-job"
+
+            def get(self, job_id, server_id):
+                return {"status": "completed", "progress": 100, "message": "Java 8 已準備完成"}
+
+        java_runtime = FakeJavaRuntime()
+        jobs = CoreUpdateJobs(self.store, MultiServerManager(self.store), java_runtime)
+        with patch.object(CoreAdapter, "resolve_java", side_effect=[ValueError("找不到 Java 8"), (r"C:\\Java8\\bin\\java.exe", 8)]):
+            path = jobs._forge_java("core-job", profile, "1.12.2", 9)
+        self.assertTrue(path.endswith("java.exe"))
+        self.assertEqual(java_runtime.request, (profile["id"], 8, 9, False))
+
+    def test_forge_1122_core_update_uses_java8_and_writes_compatible_metadata(self):
+        directory = Path(self.temp.name) / "forge-1122-core-job"
+        profile = self.store.create("Forge 1.12.2", directory, "Forge", minecraft_version="1.12.2")
+        manager = MultiServerManager(self.store)
+        jobs = CoreUpdateJobs(self.store, manager)
+
+        def fake_download(core, version, progress):
+            path = directory / "forge-1.12.2-installer.jar"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\\n")
+            return str(path), "downloaded"
+
+        def fake_installer(command, **kwargs):
+            self.assertEqual(command[1:3], ["-jar", str(directory / "forge-1.12.2-installer.jar")])
+            (directory / "forge-1.12.2-14.23.5.2864-universal.jar").write_bytes(b"forge")
+            return subprocess.CompletedProcess(command, 0, stdout="installed", stderr="")
+
+        with patch("web_panel.core_update.ServerManager.download_server", side_effect=fake_download), \
+             patch("web_panel.core_update.CoreAdapter.resolve_java", return_value=("java8", 8)) as resolve_java, \
+             patch("web_panel.core_update.subprocess.run", side_effect=fake_installer):
+            job_id = jobs.start(profile["id"], "Forge", "1.12.2")
+            for _ in range(300):
+                job = jobs.get(job_id, profile["id"])
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(job["status"], "completed", job)
+        resolve_java.assert_called_once_with(profile, 8, "1.12.2")
+        metadata = json.loads((directory / "core-info.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["java_required"], 8)
+        self.assertIn("forge-1.12.2-14.23.5.2864-universal.jar", metadata["jar"])
 
     def test_file_service_rejects_path_traversal(self):
         profile = self.store.create("Paper", Path(self.temp.name) / "paper", "Paper")

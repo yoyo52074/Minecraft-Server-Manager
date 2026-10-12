@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 
 from backup_manager import BackupManager
-from core_metadata import CoreMetadata, minimum_java_version
+from core_metadata import CoreMetadata, java_requirement_for_core
 from server_manager import ServerManager
 from .multi_server import CoreAdapter
 from world_lock import WorldLockProbeError, is_world_locked
@@ -87,7 +87,7 @@ class CoreUpdateJobs:
         return job_id
 
     def _forge_java(self, job_id, profile, version, actor_id):
-        required = minimum_java_version(version)
+        required = java_requirement_for_core("Forge", version)
         try:
             java_path, _ = CoreAdapter.resolve_java(profile, required, version)
             self.profiles.update(profile["id"], {"java_path": java_path})
@@ -218,7 +218,7 @@ class CoreUpdateJobs:
                 "core": download_core,
                 "minecraft_version": version,
                 "jar": installed_launcher.name,
-                "java_required": minimum_java_version(version),
+                "java_required": java_requirement_for_core(core_type, version),
                 "sha256": CoreMetadata.sha256(installed_launcher),
             }
             temp_metadata = metadata_path.with_name(f"{metadata_path.name}.{uuid.uuid4().hex}.tmp")

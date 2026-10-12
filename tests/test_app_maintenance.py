@@ -4,6 +4,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from starlette.websockets import WebSocketDisconnect
 
@@ -351,6 +352,46 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertIn("Java 25",response.json()["message"])
         self.assertIn("Java 21",response.json()["message"])
         popen.assert_not_called()
+
+    def test_start_forge_1122_with_java11_requests_java8_auto_repair(self):
+        directory = Path(self.temp.name) / "forge-1122-api"
+        profile = self.app.state.profiles.create(
+            "Forge 1.12.2", directory, "Forge", minecraft_version="1.12.2", java_path="java"
+        )
+        (directory / "forge-1.12.2-14.23.5.2864-universal.jar").write_bytes(b"placeholder")
+        with patch("web_panel.multi_server.CoreAdapter.java_major_version", return_value=11), \
+             patch("web_panel.multi_server.subprocess.Popen") as popen, \
+             patch.object(JavaRuntimeJobs, "start", return_value="java8-job") as java_start:
+            response = self.client.post(
+                f"/api/servers/{profile['id']}/start", headers={"x-csrf-token": self.csrf}
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json().get("java_setup_job_id"), "java8-job")
+        self.assertIn("Java 8", response.json()["message"])
+        java_start.assert_called_once_with(profile["id"], 8, self.user_id, start_after=True)
+        popen.assert_not_called()
+
+    def test_desktop_forge_1122_java_and_launcher_selection(self):
+        try:
+            from main import ApplicationController
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"桌面版測試在此環境無法載入 tkinter：{exc}")
+        controller = ApplicationController.__new__(ApplicationController)
+        self.assertEqual(controller.get_required_java_version_for_version("1.12.2", "Forge"), 8)
+        self.assertEqual(controller.get_required_java_version_for_version("1.12.2", "Paper"), 11)
+        controller.app_directory = self.temp.name
+        controller.java_executable_path = "java"
+        controller.embedded_java_path = ""
+        controller.java_major_version = 25
+        with patch.object(controller, "get_java_major_version", return_value=25):
+            self.assertFalse(controller.ensure_java_version(8))
+        (Path(self.server_dir) / "forge-1.12.2-14.23.5.2864-universal.jar").write_bytes(b"forge")
+        (Path(self.server_dir) / "minecraft_server.1.12.2.jar").write_bytes(b"vanilla")
+        controller.server_manager = SimpleNamespace(server_directory=self.server_dir)
+        controller.core_metadata = SimpleNamespace(load=lambda: {"core": "Forge"})
+        controller.root = SimpleNamespace(core_combo=SimpleNamespace(get=lambda: "Forge"))
+        self.assertEqual([Path(path).name for path in controller.get_server_jars()],
+                         ["forge-1.12.2-14.23.5.2864-universal.jar"])
 
     def test_backup_retention_verify_and_restore_safety(self):
         headers = {"x-csrf-token": self.csrf}
