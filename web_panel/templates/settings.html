@@ -47,9 +47,9 @@
   <section class="card core-update-card">
     <h2>變更 Minecraft 版本</h2>
     <p>目前核心：<strong>{{ profile.core_type }}</strong>　｜　目前版本：<strong>{{ profile.minecraft_version or '尚未設定' }}</strong></p>
-    <p class="muted">支援 Paper 與 Vanilla。更新前會建立世界／插件等完整備份，並把舊核心封存至 backups/cores；伺服器必須先停止。Forge／Fabric 請使用原核心安裝流程更新。</p>
+    <p class="muted">支援 Paper、Vanilla、Forge 與 Fabric。更新前會建立世界／插件等完整備份，並把舊核心封存至 backups/cores；Forge 會執行官方無介面安裝器，Fabric 會下載官方伺服器 launcher。伺服器必須先停止。</p>
     <div class="grid">
-      <div><label for="update-core">核心</label><select id="update-core"><option value="Paper" {% if profile.core_type == 'Paper' %}selected{% endif %}>Paper</option><option value="Vanilla" {% if profile.core_type == 'Vanilla' %}selected{% endif %}>Vanilla（官方版）</option></select></div>
+      <div><label for="update-core">核心</label><select id="update-core"><option value="Paper" {% if profile.core_type == 'Paper' %}selected{% endif %}>Paper</option><option value="Vanilla" {% if profile.core_type == 'Vanilla' %}selected{% endif %}>Vanilla（官方版）</option><option value="Forge" {% if profile.core_type == 'Forge' %}selected{% endif %}>Forge</option><option value="Fabric" {% if profile.core_type == 'Fabric' %}selected{% endif %}>Fabric</option></select></div>
       <div><label for="update-version">目標 Minecraft 版本</label><input id="update-version" value="{{ profile.minecraft_version }}" placeholder="例如：26.1 或 1.21.8" pattern="[A-Za-z0-9_.+-]{1,40}" required></div>
     </div>
     <button id="update-core-button" type="button" class="danger" onclick="startCoreUpdate()">建立備份並更新核心</button>

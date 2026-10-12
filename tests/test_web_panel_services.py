@@ -211,6 +211,141 @@ time.sleep(30)
         self.assertEqual(self.store.get(profile["id"])["launcher"], "paper-1.21.4.jar")
         self.assertTrue(any((directory / "backups").glob("backup-*.zip")))
 
+    def test_forge_core_job_runs_headless_installer_and_selects_generated_launcher(self):
+        directory = Path(self.temp.name) / "empty-forge"
+        profile = self.store.create("Empty Forge", directory, "Forge", minecraft_version="1.20.1")
+        manager = MultiServerManager(self.store)
+        jobs = CoreUpdateJobs(self.store, manager)
+
+        def fake_download(core, version, progress):
+            self.assertEqual((core, version), ("Forge", "1.20.1"))
+            path = directory / "forge-1.20.1-installer.jar"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+            progress(100)
+            return str(path), "downloaded"
+
+        def fake_installer(command, **kwargs):
+            self.assertEqual(command[-1], "--installServer")
+            launcher_name = "run.bat" if os.name == "nt" else "run.sh"
+            launcher = Path(kwargs["cwd"]) / launcher_name
+            launcher.write_text("@echo off\n" if launcher_name.endswith(".bat") else "#!/bin/sh\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="Forge installed", stderr="")
+
+        with patch("web_panel.core_update.ServerManager.download_server", side_effect=fake_download), \
+             patch("web_panel.core_update.CoreAdapter.resolve_java", return_value=("java", 17)), \
+             patch("web_panel.core_update.subprocess.run", side_effect=fake_installer) as run_installer:
+            job_id = jobs.start(profile["id"], "Forge", "1.20.1")
+            for _ in range(300):
+                job = jobs.get(job_id, profile["id"])
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(job["status"], "completed", job)
+        run_installer.assert_called_once()
+        updated = self.store.get(profile["id"])
+        expected_launcher = "run.bat" if os.name == "nt" else "run.sh"
+        self.assertEqual(updated["launcher"], expected_launcher)
+        self.assertTrue((directory / expected_launcher).is_file())
+        self.assertFalse((directory / "forge-1.20.1-installer.jar").exists())
+        self.assertTrue(any((directory / "backups" / "cores").glob("*-forge-1.20.1-installer.jar")))
+        metadata = json.loads((directory / "core-info.json").read_text(encoding="utf-8"))
+        self.assertEqual((metadata["core"], metadata["jar"]), ("Forge", expected_launcher))
+
+    def _run_failed_forge_update(self, installer_result=None, installer_error=None):
+        directory = Path(self.temp.name) / f"failed-forge-{uuid.uuid4().hex[:6]}"
+        profile = self.store.create("Failed Forge", directory, "Forge", minecraft_version="1.20.1")
+        manager = MultiServerManager(self.store)
+        jobs = CoreUpdateJobs(self.store, manager)
+
+        def fake_download(core, version, progress):
+            path = directory / "forge-1.20.1-installer.jar"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+            return str(path), "downloaded"
+
+        run_patch = patch("web_panel.core_update.subprocess.run", side_effect=installer_error or [installer_result])
+        with patch("web_panel.core_update.ServerManager.download_server", side_effect=fake_download), \
+             patch("web_panel.core_update.CoreAdapter.resolve_java", return_value=("java", 17)), run_patch:
+            job_id = jobs.start(profile["id"], "Forge", "1.20.1")
+            for _ in range(300):
+                job = jobs.get(job_id, profile["id"])
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+        return directory, profile, manager, job
+
+    def test_forge_installer_nonzero_exit_archives_installer_and_keeps_profile(self):
+        result = subprocess.CompletedProcess(["java", "-jar"], 1, stdout="", stderr="installer failed")
+        directory, profile, manager, job = self._run_failed_forge_update(installer_result=result)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("installer failed", job["error"])
+        self.assertFalse((directory / "forge-1.20.1-installer.jar").exists())
+        self.assertTrue(any((directory / "backups" / "cores").glob("failed-*-forge-1.20.1-installer.jar")))
+        self.assertEqual(self.store.get(profile["id"])["launcher"], "")
+        self.assertFalse((directory / "core-info.json").exists())
+        self.assertNotIn(profile["id"], manager._core_updates)
+
+    def test_forge_installer_timeout_archives_installer_and_releases_update_lock(self):
+        timeout = subprocess.TimeoutExpired(["java", "-jar"], 900)
+        directory, profile, manager, job = self._run_failed_forge_update(installer_error=timeout)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("逾時", job["error"])
+        self.assertFalse((directory / "forge-1.20.1-installer.jar").exists())
+        self.assertTrue(any((directory / "backups" / "cores").glob("failed-*-forge-1.20.1-installer.jar")))
+        self.assertEqual(self.store.get(profile["id"])["launcher"], "")
+        self.assertNotIn(profile["id"], manager._core_updates)
+
+    def test_fabric_core_job_installs_official_launcher_jar(self):
+        directory = Path(self.temp.name) / "empty-fabric"
+        profile = self.store.create("Empty Fabric", directory, "Fabric", minecraft_version="1.21.8")
+        manager = MultiServerManager(self.store)
+        jobs = CoreUpdateJobs(self.store, manager)
+
+        def fake_download(core, version, progress):
+            self.assertEqual((core, version), ("Fabric", "1.21.8"))
+            path = directory / "fabric-server-1.21.8-0.19.5-1.1.2.jar"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+            progress(100)
+            return str(path), "downloaded"
+
+        with patch("web_panel.core_update.ServerManager.download_server", side_effect=fake_download):
+            job_id = jobs.start(profile["id"], "Fabric", "1.21.8")
+            for _ in range(300):
+                job = jobs.get(job_id, profile["id"])
+                if job["status"] in {"completed", "failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(job["status"], "completed", job)
+        updated = self.store.get(profile["id"])
+        self.assertEqual(updated["core_type"], "Fabric")
+        self.assertEqual(updated["launcher"], "fabric-server-1.21.8-0.19.5-1.1.2.jar")
+        self.assertTrue((directory / updated["launcher"]).is_file())
+
+    def test_forge_install_auto_prepares_java_when_needed(self):
+        profile = self.store.create("Forge Java", Path(self.temp.name) / "forge-java", "Forge", minecraft_version="1.20.1")
+
+        class FakeJavaRuntime:
+            def __init__(self):
+                self.request = None
+
+            def start(self, server_id, required, actor_id, start_after=False):
+                self.request = (server_id, required, actor_id, start_after)
+                return "java-job"
+
+            def get(self, job_id, server_id):
+                return {"status": "completed", "progress": 100, "message": "Java 已準備完成"}
+
+        java_runtime = FakeJavaRuntime()
+        jobs = CoreUpdateJobs(self.store, MultiServerManager(self.store), java_runtime)
+        with patch.object(CoreAdapter, "resolve_java", side_effect=[ValueError("找不到 Java"), (r"C:\\Java\\bin\\java.exe", 17)]):
+            java_path = jobs._forge_java("core-job", profile, "1.20.1", 42)
+        self.assertEqual(java_path, r"C:\\Java\\bin\\java.exe")
+        self.assertEqual(java_runtime.request, (profile["id"], 17, 42, False))
+        self.assertEqual(self.store.get(profile["id"])["java_path"], java_path)
+
     def test_file_service_rejects_path_traversal(self):
         profile = self.store.create("Paper", Path(self.temp.name) / "paper", "Paper")
         service = SafeFileService(self.store)

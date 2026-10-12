@@ -52,6 +52,7 @@ class MaintenanceApiTests(unittest.TestCase):
             f.write("motd=hello\n")
         self.app = create_app(FakeController(self.server_dir), os.path.join(self.temp.name, "panel.db"))
         user_id = self.app.state.db.create_user("admin", "A-strong-password-123", "admin")
+        self.user_id = user_id
         session_id, self.csrf = self.app.state.db.create_session(user_id)
         self.session_id = session_id
         self.profile_id = self.app.state.profiles.list()[0]["id"]
@@ -159,7 +160,25 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertEqual(data["core_install_job_id"], "install-job")
         self.assertIn("安裝完成後會自動啟動", data["message"])
-        install.assert_called_once_with(profile["id"], "Paper", "1.21.4")
+        install.assert_called_once_with(profile["id"], "Paper", "1.21.4", self.user_id)
+
+    def test_start_without_forge_or_fabric_core_automatically_queues_install(self):
+        for core_type, version in (("Forge", "1.20.1"), ("Fabric", "1.21.8")):
+            with self.subTest(core_type=core_type):
+                profile = self.app.state.profiles.create(
+                    f"Empty {core_type}", Path(self.temp.name) / f"Empty {core_type}",
+                    core_type, minecraft_version=version,
+                )
+                with patch.object(self.app.state.multi, "start", return_value=(False, "找不到伺服器啟動檔，請先上傳或安裝核心")), \
+                     patch.object(self.app.state.core_updates, "start", return_value="install-job") as install:
+                    response = self.client.post(
+                        f"/api/servers/{profile['id']}/start",
+                        headers={"x-csrf-token": self.csrf}, json={},
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["core_install_job_id"], "install-job")
+                self.assertIn(f"開始安裝 {core_type} {version}", response.json()["message"])
+                install.assert_called_once_with(profile["id"], core_type, version, self.user_id)
 
     def test_dashboard_has_safe_server_remove_action(self):
         response=self.client.get("/")
@@ -197,6 +216,9 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertIn("變更 Minecraft 版本",response.text)
         self.assertIn("/core-update",response.text)
         self.assertIn("目標 Minecraft 版本",response.text)
+        self.assertIn('option value="Forge"',response.text)
+        self.assertIn('option value="Fabric"',response.text)
+        self.assertIn("Forge 會執行官方無介面安裝器",response.text)
         self.assertIn("backups/cores",response.text)
 
     def test_java_auto_search_applies_matching_runtime_and_logs_it(self):
@@ -252,9 +274,9 @@ class MaintenanceApiTests(unittest.TestCase):
     def test_core_update_api_rejects_unsupported_core_and_running_server(self):
         url=f"/api/servers/{self.profile_id}/core-update"
         headers={"x-csrf-token":self.csrf}
-        unsupported=self.client.post(url,headers=headers,json={"core_type":"Forge","version":"1.21.4"})
+        unsupported=self.client.post(url,headers=headers,json={"core_type":"Bedrock","version":"1.21.4"})
         self.assertEqual(unsupported.status_code,400)
-        self.assertIn("Paper 與 Vanilla",unsupported.json()["detail"])
+        self.assertIn("Paper、Vanilla、Forge 與 Fabric",unsupported.json()["detail"])
         with patch.object(self.app.state.multi,"status",return_value={"running":True,"phase":"running"}):
             running=self.client.post(url,headers=headers,json={"core_type":"Paper","version":"1.21.4"})
         self.assertEqual(running.status_code,400)

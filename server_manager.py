@@ -2,9 +2,10 @@ import os
 import re
 import stat
 import tempfile
+from defusedxml import ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -16,8 +17,11 @@ class ServerManager:
         "fill.papermc.io", "api.papermc.io", "cdn.papermc.io",
         "launchermeta.mojang.com", "piston-meta.mojang.com",
         "piston-data.mojang.com", "launcher.mojang.com", "maven.minecraftforge.net",
+        "meta.fabricmc.net", "maven.fabricmc.net",
     }
     MAX_CORE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
+    FORGE_METADATA_URL = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+    MAX_FORGE_METADATA_BYTES = 2 * 1024 * 1024
 
     def __init__(self, server_directory):
         self.server_directory = os.path.realpath(server_directory)
@@ -51,7 +55,13 @@ class ServerManager:
                 response.raise_for_status()
                 return [item["id"] for item in response.json()["versions"] if item["type"] == "release"]
             if core_name == "Forge":
-                return ["1.20.1", "1.19.4", "1.18.2", "1.16.5"]
+                response = self._safe_get(self.FORGE_METADATA_URL, timeout=15)
+                response.raise_for_status()
+                return self._forge_minecraft_versions(response.content)
+            if core_name == "Fabric":
+                response = self._safe_get("https://meta.fabricmc.net/v2/versions/game", timeout=15)
+                response.raise_for_status()
+                return [item["version"] for item in response.json() if item.get("stable")]
         except (requests.RequestException, ValueError, KeyError) as exc:
             print(f"獲取 {core_name} 版本列表失敗: {exc}")
         return []
@@ -64,6 +74,8 @@ class ServerManager:
                 return self._download_vanilla(version, progress_callback)
             if core_name == "Forge":
                 return self._download_forge(version, progress_callback)
+            if core_name == "Fabric":
+                return self._download_fabric(version, progress_callback)
             return None, f"不支援的伺服器核心：{core_name}"
         except Exception as exc:
             return None, str(exc)
@@ -92,16 +104,89 @@ class ServerManager:
             return None, f"Vanilla {version} 沒有可用的伺服器下載檔"
         return self._download_file(download_url, f"vanilla-{version}.jar", progress_callback)
 
+    @classmethod
+    def _parse_forge_metadata(cls, xml_bytes):
+        if not isinstance(xml_bytes, (bytes, bytearray)) or len(xml_bytes) > cls.MAX_FORGE_METADATA_BYTES:
+            raise ValueError("Forge 版本資訊無效或超過大小限制")
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError as exc:
+            raise ValueError("Forge 官方版本資訊格式錯誤") from exc
+
+        builds_by_game = {}
+        for node in root.findall("./versioning/versions/version"):
+            coordinate = (node.text or "").strip()
+            match = re.fullmatch(r"(\d+(?:\.\d+){1,3})-(\d+(?:\.\d+){1,3})", coordinate)
+            if not match:
+                continue
+            game_version, forge_build = match.groups()
+            build_key = tuple(int(part) for part in forge_build.split("."))
+            current = builds_by_game.get(game_version)
+            if current is None or build_key > current[0]:
+                builds_by_game[game_version] = (build_key, forge_build)
+        return builds_by_game
+
+    @classmethod
+    def _forge_minecraft_versions(cls, xml_bytes):
+        builds = cls._parse_forge_metadata(xml_bytes)
+        return sorted(
+            builds,
+            key=lambda version: tuple(int(part) for part in version.split(".")),
+            reverse=True,
+        )
+
     def _download_forge(self, version, progress_callback):
-        forge_urls = {
-            "1.20.1": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar",
-            "1.19.4": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.19.4-45.2.0/forge-1.19.4-45.2.0-installer.jar",
-            "1.18.2": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.18.2-40.2.1/forge-1.18.2-40.2.1-installer.jar",
-            "1.16.5": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-installer.jar",
-        }
-        if version not in forge_urls:
-            return None, f"Forge {version} 的下載連結不存在"
-        return self._download_file(forge_urls[version], f"forge-{version}-installer.jar", progress_callback)
+        version = str(version or "").strip()
+        if not re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+            return None, "請輸入有效的 Minecraft 版本號"
+        response = self._safe_get(self.FORGE_METADATA_URL, timeout=15)
+        response.raise_for_status()
+        forge_build = self._parse_forge_metadata(response.content).get(version)
+        if not forge_build:
+            return None, f"Forge 官方尚無 Minecraft {version} 的安裝器"
+        forge_build = forge_build[1]
+        artifact = f"{version}-{forge_build}"
+        url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{artifact}/forge-{artifact}-installer.jar"
+        return self._download_file(url, f"forge-{artifact}-installer.jar", progress_callback)
+
+    def _download_fabric(self, version, progress_callback):
+        version = str(version or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.+-]{1,40}", version):
+            return None, "請輸入有效的 Minecraft 版本號"
+        encoded = quote(version, safe="")
+        response = self._safe_get(f"https://meta.fabricmc.net/v2/versions/loader/{encoded}", timeout=15)
+        response.raise_for_status()
+        loaders = response.json()
+        if not isinstance(loaders, list):
+            return None, "Fabric Loader 版本資訊格式不正確"
+        loader = next((item.get("loader") for item in loaders
+                       if isinstance(item, dict) and isinstance(item.get("loader"), dict)
+                       and item["loader"].get("stable")), None)
+        if not loader and loaders:
+            first = loaders[0]
+            loader = first.get("loader") if isinstance(first, dict) else None
+        if not isinstance(loader, dict):
+            loader = None
+        if not loader or not loader.get("version"):
+            return None, f"Fabric 尚無適用於 Minecraft {version} 的 Loader"
+
+        response = self._safe_get("https://meta.fabricmc.net/v2/versions/installer", timeout=15)
+        response.raise_for_status()
+        installers = response.json()
+        if not isinstance(installers, list):
+            return None, "Fabric Installer 版本資訊格式不正確"
+        installer = next((item for item in installers if item.get("stable")), None)
+        if not installer and installers:
+            installer = installers[0]
+        if not installer or not installer.get("version"):
+            return None, "無法取得 Fabric Installer 版本資訊"
+
+        loader_version = str(loader["version"])
+        installer_version = str(installer["version"])
+        url = (f"https://meta.fabricmc.net/v2/versions/loader/{encoded}/"
+               f"{quote(loader_version, safe='')}/{quote(installer_version, safe='')}/server/jar")
+        filename = f"fabric-server-{version}-{loader_version}-{installer_version}.jar"
+        return self._download_file(url, filename, progress_callback)
 
     def _download_file(self, url, filename, progress_callback):
         filename = str(filename or "")
@@ -150,7 +235,11 @@ class ServerManager:
         timeout = kwargs.pop("timeout", (20, 30))
         for _ in range(6):
             parsed = urlparse(current)
-            if (parsed.scheme != "https" or not parsed.hostname
+            try:
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("核心下載 URL port 格式錯誤") from exc
+            if (parsed.scheme != "https" or not parsed.hostname or port not in (None, 443)
                     or parsed.hostname.casefold() not in cls.ALLOWED_DOWNLOAD_HOSTS
                     or parsed.username or parsed.password):
                 raise ValueError("核心下載 URL 指向不受信任的 HTTPS 主機")

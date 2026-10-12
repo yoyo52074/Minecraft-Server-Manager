@@ -41,8 +41,8 @@ def create_app(controller, database_path):
     legacy_profile = profiles.ensure_legacy(controller.server_directory)
     multi = MultiServerManager(profiles, controller.web_bridge)
     files = SafeFileService(profiles)
-    core_updates = CoreUpdateJobs(profiles, multi)
     java_runtime = JavaRuntimeJobs(profiles, db, Path(database_path).resolve().parent / "runtimes", start_server=multi.start)
+    core_updates = CoreUpdateJobs(profiles, multi, java_runtime)
     app.state.db = db
     app.state.bridge = controller.web_bridge
     app.state.profiles = profiles
@@ -490,7 +490,7 @@ def create_app(controller, database_path):
         check_csrf(request, user)
         payload = await request.json()
         try:
-            job_id = core_updates.start(profile_id, payload.get("core_type"), payload.get("version"))
+            job_id = core_updates.start(profile_id, payload.get("core_type"), payload.get("version"), user["user_id"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "start_core_update", f"{profile_id}:{payload.get('core_type')}:{payload.get('version')}", server_id=profile_id)
@@ -1075,15 +1075,13 @@ def create_app(controller, database_path):
         if action == "start" and not ok and message == "找不到伺服器啟動檔，請先上傳或安裝核心":
             profile = profiles.get(profile_id)
             version = str((profile or {}).get("minecraft_version") or "").strip()
-            if profile and profile["core_type"] not in {"Paper", "Vanilla"}:
-                message = "此核心目前無法由網頁面板自動安裝；請先使用對應的 Forge/Fabric 安裝流程安裝核心。"
-            elif not version:
+            if not version:
                 message = "伺服器尚未設定 Minecraft 版本；請先在伺服器設定填入版本，再按啟動即可自動安裝核心。"
             elif not db.has_server_permission(user, profile_id, "settings.edit_startup"):
                 message = "目前帳號沒有核心安裝權限；請管理員授予伺服器啟動設定權限，或由管理員執行啟動。"
             else:
                 try:
-                    job_id = core_updates.start(profile_id, profile["core_type"], version)
+                    job_id = core_updates.start(profile_id, profile["core_type"], version, user["user_id"])
                     db.audit(user["user_id"], "auto_install_core", f"{profile_id}:{profile['core_type']}:{version}", server_id=profile_id)
                     return {
                         "ok": False,

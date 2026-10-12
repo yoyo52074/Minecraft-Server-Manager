@@ -6,7 +6,7 @@
 
 ## 結論
 
-找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **94 項測試通過**；Bandit 掃描 **6,326 行：High 0、Medium 0、Low 19**；pip-audit 回報 **No known vulnerabilities found**。
+找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **105 項測試通過**；Bandit 掃描 **6,492 行：High 0、Medium 0、Low 21**；pip-audit 回報 **No known vulnerabilities found**。
 
 這些結果表示已知程式碼問題有所改善，**不等於 Windows 主機、隧道服務、反向代理或網路設定已通過滲透測試或安全認證**。本輪修正已由 GitHub Actions 成功建置並通過 EXE 驗證及啟動 Smoke Test（[Run `38225026721`](https://github.com/yoyo52074/Minecraft-Server-Manager/actions/runs/38225026721)；程式 commit `fd80999a0adccd884f941afc5bfe804c91a890b4`）。
 
@@ -28,16 +28,17 @@
 | 低 | 總覽頁有多餘核心支援標語。 | 已移除並由測試覆蓋。 |
 | 中 | 管理器關閉時固定等待 3 秒、Web 停止時 15 秒後自動 kill，可能在 Paper 世界存檔仍進行時關閉／殺掉 Java，留下持鎖程序或造成世界損壞。 | 桌面關閉改為等待 Java 與輸出執行緒結束；Web 正常停止不再自動強制終止；重啟等待舊程序退出；啟動與核心更新前以 OS file lock 檢查世界 `session.lock`，提示使用者勿刪鎖檔。 |
 | 低 | 新伺服器未指定路徑時可能解析到目前工作目錄，空目錄啟動也只回報找不到核心。 | 空路徑改在程式資料夾建立安全化的伺服器名稱目錄；Paper/Vanilla 空目錄啟動會先建立備份、下載／安裝核心，再自動重試啟動。 |
+| 功能 | Forge 下載只支援少數硬編碼版本，且安裝流程可能留下 installer。 | Forge 版本／build 由官方 Maven metadata 動態解析，採用所選 Minecraft 版本的最新 build；XML 使用 `defusedxml` 並限制 metadata 大小。Fabric 透過官方 API 選取穩定 Loader／Installer；Forge 以 argv、非 shell、具逾時的 Java 程序執行無介面安裝，成功／失敗時將 installer 封存，並在失敗或逾時時保持 profile 原值、釋放更新鎖。 |
 
 ## 驗證結果
 
 - Python 語法編譯：本輪修改模組通過。
-- `python -m unittest discover -s tests -v`：**94 項通過**。
-- Bandit：**6,326 行；High 0、Medium 0、Low 19**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
+- `python -m unittest discover -s tests -v`：**105 項通過**。
+- Bandit：**6,492 行；High 0、Medium 0、Low 21**。剩餘 Low 主要是使用參數陣列且未啟用 shell 的 `subprocess` 呼叫，以及監控迴圈的寬泛例外處理；未發現 High／Medium 項目。
 - pip-audit：**No known vulnerabilities found**。
 - 本輪 Windows EXE：GitHub Actions 驗證成功，PE32+ x86-64，大小 **33,653,975 bytes**，SHA-256：`12fdb20674b0145991cd65aa1d9da808b71334ddc404ea25e2bc61cc8e7f435d`；Run `38225026721` 對應 commit `fd80999a0adccd884f941afc5bfe804c91a890b4`。
 - 本機安全案例包含：無效 ZIP 衝突策略拒絕、ZIP staging 失敗不半套覆寫、備份還原 commit 失敗回滾、Windows 大小寫重複路徑拒絕、上傳超額／過期／final 清理、properties symlink 拒絕、profile 刪除後的 API／WebSocket 撤銷。
-- 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設。
+- 本輪另覆蓋：模擬 Java OS lock 時阻止啟動與核心備份、stale `session.lock` 可安全重用、正常停止不會自動 kill、空目錄安裝 Paper 核心與未指定路徑預設；Forge 官方版本目錄動態查詢、latest build 選取、無介面安裝成功，以及非零退出／逾時後 installer 封存、profile 保持不變與更新鎖釋放。
 
 ## 部署與剩餘風險
 

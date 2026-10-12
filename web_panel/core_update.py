@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -15,26 +16,32 @@ from .multi_server import CoreAdapter
 from world_lock import WorldLockProbeError, is_world_locked
 
 
-DOWNLOAD_CORE_NAMES = {"Paper": "Paper", "Vanilla": "Vanilla (官方版)"}
+DOWNLOAD_CORE_NAMES = {
+    "Paper": "Paper",
+    "Vanilla": "Vanilla (官方版)",
+    "Forge": "Forge",
+    "Fabric": "Fabric",
+}
 
 
 class CoreUpdateJobs:
-    """Run safe, asynchronous Paper/Vanilla core updates per server."""
+    """Run safe, asynchronous core installs and updates per server."""
 
-    def __init__(self, profiles, multi):
+    def __init__(self, profiles, multi, java_runtime=None):
         self.profiles = profiles
         self.multi = multi
+        self.java_runtime = java_runtime
         self._lock = threading.RLock()
         self._jobs = {}
         self._active_by_server = {}
         self._latest_by_server = {}
 
-    def start(self, server_id, core_type, version):
+    def start(self, server_id, core_type, version, actor_id=None):
         profile = self.profiles.get(server_id)
         if not profile:
             raise ValueError("找不到伺服器")
         if core_type not in DOWNLOAD_CORE_NAMES:
-            raise ValueError("網頁版核心更新目前支援 Paper 與 Vanilla；Forge/Fabric 請使用原安裝流程更新")
+            raise ValueError("網頁版核心安裝目前支援 Paper、Vanilla、Forge 與 Fabric")
         try:
             if is_world_locked(profile["directory"]):
                 raise ValueError("世界存檔目前仍被 Java 程序鎖定；請先正常停止伺服器，不要刪除 session.lock")
@@ -76,8 +83,61 @@ class CoreUpdateJobs:
             self._latest_by_server[server_id] = job_id
             self._prune_locked()
 
-        threading.Thread(target=self._run, args=(job_id, dict(profile)), daemon=True).start()
+        threading.Thread(target=self._run, args=(job_id, dict(profile), actor_id), daemon=True).start()
         return job_id
+
+    def _forge_java(self, job_id, profile, version, actor_id):
+        required = max(17, minimum_java_version(version))
+        try:
+            java_path, _ = CoreAdapter.resolve_java(profile, required, version)
+            self.profiles.update(profile["id"], {"java_path": java_path})
+            return java_path
+        except ValueError as initial_error:
+            if not self.java_runtime:
+                raise RuntimeError(str(initial_error)) from initial_error
+
+        java_job_id = self.java_runtime.start(profile["id"], required, actor_id, start_after=False)
+        deadline = time.monotonic() + 1800
+        while time.monotonic() < deadline:
+            java_job = self.java_runtime.get(java_job_id, profile["id"])
+            if not java_job:
+                raise RuntimeError("找不到 Forge 安裝所需的 Java 準備工作")
+            self._update(
+                job_id,
+                stage="java",
+                progress=java_job.get("progress", 0),
+                message=java_job.get("message") or f"正在準備 Forge 安裝所需的 Java {required}+…",
+            )
+            if java_job["status"] == "failed":
+                raise RuntimeError(java_job.get("error") or java_job.get("message") or "Java 自動準備失敗")
+            if java_job["status"] == "completed":
+                refreshed = self.profiles.get(profile["id"])
+                try:
+                    java_path, _ = CoreAdapter.resolve_java(refreshed, required, version)
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                self.profiles.update(profile["id"], {"java_path": java_path})
+                return java_path
+            time.sleep(0.25)
+        raise RuntimeError("準備 Forge 安裝所需的 Java 逾時；請稍後重試")
+
+    @staticmethod
+    def _forge_launcher(directory, version):
+        directory = Path(directory)
+        preferred = "run.bat" if os.name == "nt" else "run.sh"
+        names = [preferred, "run.bat", "run.sh"]
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and not candidate.is_symlink():
+                return candidate
+        candidates = []
+        for pattern in ("forge-*.jar", "*server*.jar", "server.jar"):
+            candidates.extend(sorted(directory.glob(pattern)))
+        for candidate in candidates:
+            if (candidate.is_file() and not candidate.is_symlink()
+                    and "installer" not in candidate.name.casefold()):
+                return candidate
+        raise RuntimeError(f"Forge {version} 安裝完成，但找不到可用的 run.{ 'bat' if os.name == 'nt' else 'sh' } 或伺服器啟動 JAR")
 
     def _prune_locked(self):
         finished = sorted(
@@ -93,7 +153,7 @@ class CoreUpdateJobs:
             if job:
                 job.update(values)
 
-    def _run(self, job_id, profile):
+    def _run(self, job_id, profile, actor_id=None):
         directory = Path(profile["directory"])
         core_type = self._jobs[job_id]["core_type"]
         version = self._jobs[job_id]["version"]
@@ -121,9 +181,31 @@ class CoreUpdateJobs:
                 if damaged_member:
                     raise zipfile.BadZipFile(f"核心檔案驗證失敗：{damaged_member}")
 
+            installed_launcher = download_path
+            if core_type == "Forge":
+                java_path = self._forge_java(job_id, profile, version, actor_id)
+                self._update(job_id, stage="install", progress=0, message=f"正在執行 Forge {version} 無介面伺服器安裝…")
+                try:
+                    result = subprocess.run(
+                        [str(java_path), "-jar", str(download_path), "--installServer"],
+                        cwd=str(directory), capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=900, check=False,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError("Forge 安裝超過 15 分鐘逾時；更新前備份已保留") from exc
+                if result.returncode != 0:
+                    output = (result.stderr or result.stdout or "").strip()[-3000:]
+                    detail = f"Forge 安裝器結束碼為 {result.returncode}"
+                    if output:
+                        detail += f"：{output}"
+                    raise RuntimeError(detail)
+                installed_launcher = self._forge_launcher(directory, version)
+
             self._update(job_id, stage="switch", progress=100, message="下載完成，正在封存舊核心並套用版本…")
             archive_dir = directory / BackupManager.BACKUP_DIR_NAME / "cores"
-            old_jars = [path for path in directory.glob("*.jar") if path.resolve() != download_path]
+            old_jars = [path for path in directory.glob("*.jar")
+                        if path.resolve() in initial_jars and path.resolve() != download_path]
             archived = []
             if old_jars:
                 archive_dir.mkdir(parents=True, exist_ok=True)
@@ -135,9 +217,9 @@ class CoreUpdateJobs:
             metadata = {
                 "core": download_core,
                 "minecraft_version": version,
-                "jar": download_path.name,
+                "jar": installed_launcher.name,
                 "java_required": minimum_java_version(version),
-                "sha256": CoreMetadata.sha256(download_path),
+                "sha256": CoreMetadata.sha256(installed_launcher),
             }
             temp_metadata = metadata_path.with_name(f"{metadata_path.name}.{uuid.uuid4().hex}.tmp")
             try:
@@ -146,7 +228,7 @@ class CoreUpdateJobs:
                 self.profiles.update(profile["id"], {
                     "core_type": core_type,
                     "minecraft_version": version,
-                    "launcher": download_path.name,
+                    "launcher": installed_launcher.name,
                 })
                 profile_updated = True
             except Exception:
@@ -166,7 +248,14 @@ class CoreUpdateJobs:
                     old_jar.unlink()
                 except OSError as exc:
                     warnings.append(f"舊核心已封存至 {archived_path.name}，但無法清除原檔：{exc}")
-            detail = f"已更新為 {core_type} {version}。更新前備份：{os.path.basename(backup_path)}"
+            if core_type == "Forge" and download_path.exists():
+                try:
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    archived_installer = archive_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}-{download_path.name}"
+                    shutil.move(str(download_path), str(archived_installer))
+                except OSError as exc:
+                    warnings.append(f"Forge installer 未能移至核心封存區：{exc}")
+            detail = f"已安裝／更新為 {core_type} {version}。更新前備份：{os.path.basename(backup_path)}"
             if warnings:
                 detail += "；注意：" + "；".join(warnings)
             self._update(job_id, status="completed", stage="complete", message=detail, finished_at=time.time())
