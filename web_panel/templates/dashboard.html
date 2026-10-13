@@ -1,1 +1,126 @@
-{% extends 'base.html' %}{% block title %}伺服器總覽{% endblock %}{% block content %}<main class="wrap"><div style="display:flex;align-items:center;gap:12px"><h1 style="margin-right:auto">伺服器總覽</h1>{% if user.role == 'admin' %}<button onclick="showCreate()">＋新增伺服器</button>{% endif %}</div><p class="muted"><span id="live">● 即時連線中</span></p><section id="servers" class="grid">{% for item in servers %}<article id="server-card-{{ item.id }}" class="card server-entry" tabindex="0" role="link" onclick="openServer({{ item.id }})" onkeydown="if(event.key==='Enter'||event.key===' ')openServer({{ item.id }})" style="cursor:pointer"><h2>{{ item.name }}</h2><div class="status {{ 'online' if item.running else 'offline' }}" data-status>{{ '● 運行中' if item.running else '● 已停止' }}</div><p class="muted">核心：{{ item.core_type }}　｜　遊戲連接埠：<span data-port>{{ item.server_port }}</span></p><p class="muted">CPU：<span data-cpu>{{ item.metrics.cpu_percent }}</span>%　｜　RAM：<span data-memory>{{ item.metrics.memory_mb }}</span> MB</p><p class="small muted">伺服器路徑：{{ item.directory }}</p><p class="small">點擊此伺服器進入專屬管理頁面 →</p>{% if user.role == 'admin' %}<button type="button" class="danger" title="只移除管理面板記錄，伺服器資料夾與世界檔案會保留" onclick="deleteServer(event,{{ item.id }})" onkeydown="event.stopPropagation()">移除伺服器</button>{% endif %}</article>{% else %}<p class="muted">目前沒有可查看的伺服器。請聯絡管理員分配伺服器權限。</p>{% endfor %}</section><section id="create" class="card" style="display:none;margin-top:16px"><h2>新增伺服器</h2><div class="grid"><div><label>名稱</label><input id="new-name" placeholder="例如：Fabric 模組服"><label>資料夾路徑</label><input id="new-dir" placeholder="可不填；預設依伺服器名稱建立"><small class="muted">留空時會在程式資料夾建立「伺服器名稱」資料夾。</small><label>核心</label><select id="new-core"><option>Vanilla</option><option>Paper</option><option>Forge</option><option>Fabric</option></select></div><div><label>Minecraft 版本</label><input id="new-version" placeholder="例如：1.21.8"><label>遊戲連接埠</label><input id="new-port" type="number" value="25565"><label>最大記憶體 MB</label><input id="new-memory" type="number" value="2048"></div></div><button onclick="createServer()">建立伺服器</button> <button class="secondary" onclick="document.getElementById('create').style.display='none'">取消</button><p id="create-message" class="error"></p></section></main><script>const csrf=document.cookie.split('; ').find(x=>x.startsWith('mcm_csrf='))?.split('=')[1]||'';async function api(url,opts={}){opts.headers={...(opts.headers||{}),'x-csrf-token':csrf,'content-type':'application/json'};return(await fetch(url,opts)).json()}function openServer(id){location.href='/server/'+id}function phaseLabel(item){return item.phase==='running'?'● 運行中':item.phase==='starting'?'● 啟動中':item.phase==='stopping'?'● 停止中':item.phase==='error'?'● 啟動失敗':'● 已停止'}function updateCards(list){for(const item of list){const card=document.getElementById('server-card-'+item.id);if(!card)continue;const status=card.querySelector('[data-status]');status.textContent=phaseLabel(item);status.className='status '+(item.phase==='running'?'online':item.phase==='error'?'offline':'');card.querySelector('[data-port]').textContent=item.server_port??'—';card.querySelector('[data-cpu]').textContent=item.metrics?.cpu_percent??0;card.querySelector('[data-memory]').textContent=item.metrics?.memory_mb??0}}function showCreate(){document.getElementById('create').style.display='block'}async function deleteServer(event,id){event.stopPropagation();const card=document.getElementById('server-card-'+id),name=card?.querySelector('h2')?.textContent||'此伺服器';if(!confirm(`確定從管理面板移除「${name}」？伺服器資料夾、世界、插件與檔案都會保留。`))return;const d=await api('/api/servers/'+id,{method:'DELETE',body:JSON.stringify({delete_files:false})});if(d.detail){alert(d.detail);return}if(d.ok){location.reload();return}alert(d.message||'移除伺服器失敗')}async function createServer(){const d=await api('/api/servers',{method:'POST',body:JSON.stringify({name:document.getElementById('new-name').value,directory:document.getElementById('new-dir').value,core_type:document.getElementById('new-core').value,minecraft_version:document.getElementById('new-version').value,server_port:Number(document.getElementById('new-port').value),max_memory:Number(document.getElementById('new-memory').value)})});if(d.detail){document.getElementById('create-message').textContent=d.detail}else{location.reload()}}function connect(){const scheme=location.protocol==='https:'?'wss':'ws',ws=new WebSocket(scheme+'://'+location.host+'/ws/servers');ws.onopen=()=>document.getElementById('live').textContent='● 即時連線中';ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='servers')updateCards(d.servers)};ws.onclose=()=>{document.getElementById('live').textContent='○ 重新連線中';setTimeout(connect,1500)}}connect()</script>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}伺服器總覽{% endblock %}
+{% block content %}
+<main class="wrap">
+  <header class="dashboard-header">
+    <h1>伺服器總覽</h1>
+    {% if user.role == 'admin' %}<button type="button" onclick="showCreate()">＋新增伺服器</button>{% endif %}
+  </header>
+  <p class="muted"><span id="live">● 即時連線中</span></p>
+
+  {% if user.role == 'admin' and node_resources %}
+  <section id="cluster-resources" class="card node-overview" aria-labelledby="cluster-title">
+    <div class="node-overview-head">
+      <div>
+        <p class="eyebrow">CLUSTER OVERVIEW</p>
+        <h2 id="cluster-title">叢集節點總資源</h2>
+        <p class="muted" data-cluster-scope>目前僅統計執行管理面板的本機節點；第二節點尚未連線。</p>
+      </div>
+      <div class="node-count-badge" aria-live="polite">
+        <strong><span data-online-node-count>{{ node_resources.online_node_count }}</span>/<span data-node-count>{{ node_resources.node_count }}</span></strong>
+        <span>節點在線</span>
+      </div>
+    </div>
+
+    <div class="node-total-grid">
+      <article class="node-total-item">
+        <span class="muted">CPU 總容量</span>
+        <strong><span data-total-physical-cores>{{ node_resources.totals.cpu_physical_cores }}</span> 實體核心</strong>
+        <p><span data-total-logical-cores>{{ node_resources.totals.cpu_logical_cores }}</span> 執行緒 · 使用率 <span data-total-cpu-percent>{{ node_resources.totals.cpu_percent }}</span>%</p>
+        <div class="progress" role="progressbar" aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ node_resources.totals.cpu_percent }}"><i data-cpu-bar style="width:{{ node_resources.totals.cpu_percent }}%"></i></div>
+      </article>
+      <article class="node-total-item">
+        <span class="muted">RAM 總容量</span>
+        <strong data-total-memory>{{ (node_resources.totals.memory_total_bytes / 1073741824)|round(1) }} GiB</strong>
+        <p>已用 <span data-used-memory>{{ (node_resources.totals.memory_used_bytes / 1073741824)|round(1) }}</span> GiB · 可用 <span data-free-memory>{{ (node_resources.totals.memory_available_bytes / 1073741824)|round(1) }}</span> GiB</p>
+        <div class="progress" role="progressbar" aria-label="RAM 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ node_resources.totals.memory_percent }}"><i data-memory-bar style="width:{{ node_resources.totals.memory_percent }}%"></i></div>
+      </article>
+      <article class="node-total-item">
+        <span class="muted">伺服器資料磁碟總容量</span>
+        <strong data-total-disk>{{ (node_resources.totals.disk_total_bytes / 1073741824)|round(1) }} GiB</strong>
+        <p>已用 <span data-used-disk>{{ (node_resources.totals.disk_used_bytes / 1073741824)|round(1) }}</span> GiB · 可用 <span data-free-disk>{{ (node_resources.totals.disk_free_bytes / 1073741824)|round(1) }}</span> GiB</p>
+        <div class="progress" role="progressbar" aria-label="資料磁碟使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ node_resources.totals.disk_percent }}"><i data-disk-bar style="width:{{ node_resources.totals.disk_percent }}%"></i></div>
+      </article>
+    </div>
+
+    <div class="node-list-heading">
+      <h3>節點明細</h3>
+      <span class="small muted">資料磁碟按伺服器資料夾所在磁碟區統計，同一磁碟區只計一次</span>
+    </div>
+    <div id="cluster-node-list" class="node-list" aria-live="polite">
+      {% for node in node_resources.nodes %}
+      <article class="node-row" data-node-id="{{ node.node_id }}">
+        <div class="node-row-head"><strong data-node-name>{{ node.name }}</strong><span class="node-state {{ 'online' if node.status == 'online' else 'offline' }}" data-node-state>{{ '在線' if node.status == 'online' else '離線' }}</span></div>
+        <p data-node-details>CPU {{ node.cpu_physical_cores }} 核心 / {{ node.cpu_logical_cores }} 執行緒 · RAM {{ (node.memory_total_bytes / 1073741824)|round(1) }} GiB · 資料磁碟 {{ (node.disk_total_bytes / 1073741824)|round(1) }} GiB</p>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section id="servers" class="grid" aria-label="伺服器清單">
+    {% for item in servers %}
+    <article id="server-card-{{ item.id }}" class="card server-entry" tabindex="0" role="link" onclick="openServer({{ item.id }})" onkeydown="if(event.key==='Enter'||event.key===' ')openServer({{ item.id }})" style="cursor:pointer">
+      <h2>{{ item.name }}</h2>
+      <div class="status {{ 'online' if item.running else 'offline' }}" data-status>{{ '● 運行中' if item.running else '● 已停止' }}</div>
+      <p class="muted">核心：{{ item.core_type }}　｜　遊戲連接埠：<span data-port>{{ item.server_port }}</span></p>
+      <p class="muted">CPU：<span data-cpu>{{ item.metrics.cpu_percent }}</span>%　｜　RAM：<span data-memory>{{ item.metrics.memory_mb }}</span> MB</p>
+      <p class="small muted">伺服器路徑：{{ item.directory }}</p>
+      <p class="small">點擊此伺服器進入專屬管理頁面 →</p>
+      {% if user.role == 'admin' %}<button type="button" class="danger" title="只移除管理面板記錄，伺服器資料夾與世界檔案會保留" onclick="deleteServer(event,{{ item.id }})" onkeydown="event.stopPropagation()">移除伺服器</button>{% endif %}
+    </article>
+    {% else %}
+    <p class="muted">目前沒有可查看的伺服器。請聯絡管理員分配伺服器權限。</p>
+    {% endfor %}
+  </section>
+
+  {% if user.role == 'admin' %}
+  <section id="create" class="card" style="display:none;margin-top:16px">
+    <h2>新增伺服器</h2>
+    <div class="grid">
+      <div>
+        <label for="new-name">名稱</label><input id="new-name" placeholder="例如：Fabric 模組服">
+        <label for="new-dir">資料夾路徑</label><input id="new-dir" placeholder="可不填；預設依伺服器名稱建立">
+        <small class="muted">留空時會在程式資料夾建立「伺服器名稱」資料夾。</small>
+        <label for="new-core">核心</label><select id="new-core"><option>Vanilla</option><option>Paper</option><option>Forge</option><option>Fabric</option></select>
+      </div>
+      <div>
+        <label for="new-version">Minecraft 版本</label><input id="new-version" placeholder="例如：1.21.8">
+        <label for="new-port">遊戲連接埠</label><input id="new-port" type="number" value="25565">
+        <label for="new-memory">最大記憶體 MB</label><input id="new-memory" type="number" value="2048">
+      </div>
+    </div>
+    <button type="button" onclick="createServer()">建立伺服器</button>
+    <button type="button" class="secondary" onclick="document.getElementById('create').style.display='none'">取消</button>
+    <p id="create-message" class="error"></p>
+  </section>
+  {% endif %}
+</main>
+
+<style>
+.dashboard-header{display:flex;align-items:center;gap:12px}.dashboard-header h1{margin-right:auto}
+.node-overview{margin:10px 0 18px}.node-overview-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.node-overview-head h2{margin:0 0 4px}.node-overview-head p{margin:4px 0}.eyebrow{font-size:11px;letter-spacing:.12em;color:var(--accent);font-weight:700;margin:0 0 5px!important}.node-count-badge{flex:0 0 auto;display:grid;text-align:center;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:#151b22;color:var(--muted)}.node-count-badge strong{font-size:22px;color:var(--text)}.node-total-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:18px}.node-total-item{min-width:0;padding:14px;border:1px solid var(--border);border-radius:10px;background:#151b22}.node-total-item>span{display:block;font-size:13px}.node-total-item strong{display:block;font-size:22px;margin:7px 0;overflow-wrap:anywhere}.node-total-item p{color:var(--muted);font-size:13px;margin:5px 0 10px}.node-list-heading{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-top:18px}.node-list-heading h3{margin:0}.node-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr));gap:10px;margin-top:10px}.node-row{padding:12px;border:1px solid var(--border);border-radius:9px;background:#151b22;min-width:0}.node-row-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.node-row-head strong{overflow-wrap:anywhere}.node-row p{margin:7px 0 0;color:var(--muted);font-size:13px}.node-state{font-size:12px}.node-row .online{color:var(--green)}.node-row .offline{color:var(--red)}
+@media(max-width:760px){.node-total-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.dashboard-header{align-items:flex-start}.node-total-grid{grid-template-columns:1fr}.node-overview-head{flex-direction:column}.node-count-badge{display:flex;gap:6px;align-items:center;text-align:left}.node-list-heading{display:block}.node-list-heading .small{display:block;margin-top:4px}}
+</style>
+
+<script>
+const csrf=document.cookie.split('; ').find(x=>x.startsWith('mcm_csrf='))?.split('=')[1]||'';
+async function api(url,opts={}){opts.headers={...(opts.headers||{}),'x-csrf-token':csrf,'content-type':'application/json'};return(await fetch(url,opts)).json()}
+function openServer(id){location.href='/server/'+id}
+function phaseLabel(item){return item.phase==='running'?'● 運行中':item.phase==='starting'?'● 啟動中':item.phase==='stopping'?'● 停止中':item.phase==='error'?'● 啟動失敗':'● 已停止'}
+function updateCards(list){for(const item of list){const card=document.getElementById('server-card-'+item.id);if(!card)continue;const status=card.querySelector('[data-status]');status.textContent=phaseLabel(item);status.className='status '+(item.phase==='running'?'online':item.phase==='error'?'offline':'');card.querySelector('[data-port]').textContent=item.server_port??'—';card.querySelector('[data-cpu]').textContent=item.metrics?.cpu_percent??0;card.querySelector('[data-memory]').textContent=item.metrics?.memory_mb??0}}
+function gib(bytes){const value=Number(bytes||0)/1073741824;return (value>=100?value.toFixed(0):value.toFixed(1))+' GiB'}
+function percent(value){const n=Number(value||0);return Math.max(0,Math.min(100,Number.isFinite(n)?n:0))}
+function setText(selector,value){const el=document.querySelector(selector);if(el)el.textContent=String(value??'—')}
+function setBar(selector,value){const el=document.querySelector(selector);if(el){const p=percent(value);el.style.width=p+'%';const progress=el.closest('[role="progressbar"]');if(progress)progress.setAttribute('aria-valuenow',String(p))}}
+function createNodeRow(id){const article=document.createElement('article');article.className='node-row';article.dataset.nodeId=id;const head=document.createElement('div');head.className='node-row-head';const name=document.createElement('strong');name.dataset.nodeName='';const state=document.createElement('span');state.className='node-state';state.dataset.nodeState='';head.append(name,state);const detail=document.createElement('p');detail.dataset.nodeDetails='';article.append(head,detail);return article}
+function updateNodeResources(data){const root=document.getElementById('cluster-resources');if(!root||!data)return;const total=data.totals||{};setText('[data-node-count]',data.node_count);setText('[data-online-node-count]',data.online_node_count);setText('[data-total-physical-cores]',total.cpu_physical_cores);setText('[data-total-logical-cores]',total.cpu_logical_cores);setText('[data-total-cpu-percent]',Number(total.cpu_percent||0).toFixed(1));setBar('[data-cpu-bar]',total.cpu_percent);setText('[data-total-memory]',gib(total.memory_total_bytes));setText('[data-used-memory]',(Number(total.memory_used_bytes||0)/1073741824).toFixed(1));setText('[data-free-memory]',(Number(total.memory_available_bytes||0)/1073741824).toFixed(1));setBar('[data-memory-bar]',total.memory_percent);setText('[data-total-disk]',gib(total.disk_total_bytes));setText('[data-used-disk]',(Number(total.disk_used_bytes||0)/1073741824).toFixed(1));setText('[data-free-disk]',(Number(total.disk_free_bytes||0)/1073741824).toFixed(1));setBar('[data-disk-bar]',total.disk_percent);const list=document.getElementById('cluster-node-list');if(!list)return;const nodes=Array.isArray(data.nodes)?data.nodes:[],ids=new Set(nodes.map(n=>String(n.node_id||n.name||'node')));for(const row of Array.from(list.children)){if(!ids.has(row.dataset.nodeId))row.remove()}for(const node of nodes){const id=String(node.node_id||node.name||'node');let row=Array.from(list.children).find(item=>item.dataset.nodeId===id);if(!row){row=createNodeRow(id);list.appendChild(row)}const online=node.status==='online';row.querySelector('[data-node-name]').textContent=node.name||id;const state=row.querySelector('[data-node-state]');state.textContent=online?'在線':'離線';state.className='node-state '+(online?'online':'offline');row.querySelector('[data-node-details]').textContent=`CPU ${node.cpu_physical_cores||0} 核心 / ${node.cpu_logical_cores||0} 執行緒 · RAM ${gib(node.memory_total_bytes)} · 資料磁碟 ${gib(node.disk_total_bytes)}`}}
+function showCreate(){document.getElementById('create').style.display='block'}
+async function deleteServer(event,id){event.stopPropagation();const card=document.getElementById('server-card-'+id),name=card?.querySelector('h2')?.textContent||'此伺服器';if(!confirm(`確定從管理面板移除「${name}」？伺服器資料夾、世界、插件與檔案都會保留。`))return;const d=await api('/api/servers/'+id,{method:'DELETE',body:JSON.stringify({delete_files:false})});if(d.detail){alert(d.detail);return}if(d.ok){location.reload();return}alert(d.message||'移除伺服器失敗')}
+async function createServer(){const d=await api('/api/servers',{method:'POST',body:JSON.stringify({name:document.getElementById('new-name').value,directory:document.getElementById('new-dir').value,core_type:document.getElementById('new-core').value,minecraft_version:document.getElementById('new-version').value,server_port:Number(document.getElementById('new-port').value),max_memory:Number(document.getElementById('new-memory').value)})});if(d.detail){document.getElementById('create-message').textContent=d.detail}else{location.reload()}}
+function connect(){const scheme=location.protocol==='https:'?'wss':'ws',ws=new WebSocket(scheme+'://'+location.host+'/ws/servers');ws.onopen=()=>document.getElementById('live').textContent='● 即時連線中';ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='servers')updateCards(d.servers);if(d.node_resources)updateNodeResources(d.node_resources)};ws.onclose=()=>{document.getElementById('live').textContent='○ 重新連線中';setTimeout(connect,1500)}}
+{% if user.role == 'admin' and node_resources %}updateNodeResources({{ node_resources|tojson }});{% endif %}
+connect();
+</script>
+{% endblock %}

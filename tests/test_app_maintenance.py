@@ -322,9 +322,29 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertNotIn("Windows 多伺服器管理面板",response.text)
         self.assertNotIn("支援 Vanilla、Paper、Forge、Fabric",response.text)
         self.assertIn('id="live"',response.text)
+        self.assertIn('id="cluster-resources"',response.text)
+        self.assertIn("叢集節點總資源",response.text)
+        self.assertIn("伺服器資料磁碟總容量",response.text)
         self.assertIn("移除伺服器",response.text)
         self.assertIn("世界檔案會保留",response.text)
         self.assertIn("delete_files:false",response.text)
+
+    def test_non_admin_dashboard_and_websocket_do_not_expose_host_resources(self):
+        viewer_id=self.app.state.db.create_user("node-viewer","Viewer-password-123","viewer")
+        self.app.state.db.set_server_permissions(viewer_id,self.profile_id,{"server.view"})
+        viewer_session,_=self.app.state.db.create_session(viewer_id)
+        client=TestClient(self.app)
+        client.cookies.set("mcm_session",viewer_session)
+        try:
+            dashboard=client.get("/")
+            self.assertEqual(dashboard.status_code,200,dashboard.text)
+            self.assertNotIn('id="cluster-resources"',dashboard.text)
+            with client.websocket_connect("/ws/servers",headers={"origin":"http://testserver"}) as socket:
+                payload=socket.receive_json()
+                self.assertEqual(payload["type"],"servers")
+                self.assertNotIn("node_resources",payload)
+        finally:
+            client.close()
 
     def test_delete_server_profile_preserves_server_directory(self):
         directory=Path(self.temp.name)/"removable"
@@ -581,6 +601,8 @@ class MaintenanceApiTests(unittest.TestCase):
         with self.client.websocket_connect("/ws/servers",headers={"origin":"http://testserver"}) as socket:
             first=socket.receive_json()
             self.assertEqual(first["type"],"servers")
+            self.assertIn("node_resources",first)
+            self.assertEqual(first["node_resources"]["node_count"],1)
             self.app.state.db.delete_session(self.session_id)
             with self.assertRaises(WebSocketDisconnect):
                 socket.receive_json()

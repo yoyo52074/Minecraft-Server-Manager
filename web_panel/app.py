@@ -27,6 +27,7 @@ from .multi_server import (
 )
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
+from .node_resources import NodeResourceService
 from .java_runtime import JavaRuntimeJobs
 
 ROLES = {"admin", "operator", "viewer"}
@@ -59,6 +60,7 @@ def create_app(controller, database_path):
     app.state.backup_jobs = BackupJobManager(db)
     app.state.scheduler = Scheduler(db, multi, lambda server_id: BackupManager(profiles.get(server_id)["directory"]), app.state.players)
     app.state.monitor = MonitorService(profiles, multi, db, players=app.state.players)
+    app.state.node_resources = NodeResourceService()
 
     def current_user(request: Request):
         return db.get_session(request.cookies.get("mcm_session"))
@@ -176,7 +178,8 @@ def create_app(controller, database_path):
         user = current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=303)
-        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=visible_servers(user))
+        node_resources = app.state.node_resources.snapshot(profiles.list()) if user["role"] == "admin" else None
+        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=visible_servers(user), node_resources=node_resources)
 
     @app.get("/server/{profile_id}", response_class=HTMLResponse)
     def server_page(profile_id: int, request: Request):
@@ -1259,7 +1262,10 @@ def create_app(controller, database_path):
                     await websocket.close(code=1008)
                     return
                 snapshot = visible_servers(session)
-                await websocket.send_json({"type": "servers", "servers": snapshot, "timestamp": asyncio.get_running_loop().time()})
+                message = {"type": "servers", "servers": snapshot, "timestamp": asyncio.get_running_loop().time()}
+                if session["role"] == "admin":
+                    message["node_resources"] = app.state.node_resources.snapshot(profiles.list())
+                await websocket.send_json(message)
                 try:
                     await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 except asyncio.TimeoutError:
