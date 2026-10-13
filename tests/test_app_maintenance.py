@@ -124,7 +124,7 @@ class MaintenanceApiTests(unittest.TestCase):
         response=self.client.get(f"/server/{self.profile_id}")
         self.assertEqual(response.status_code,200,response.text[:500])
         header=response.text.split("</nav>",1)[0]
-        for path in (f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/settings"):
+        for path in (f"/server/{self.profile_id}",f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/settings"):
             self.assertIn(f'href="{path}"',header)
         self.assertNotIn("Java 管理",response.text)
         self.assertIn("pollAutoCoreInstall", response.text)
@@ -376,6 +376,8 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertIn('option value="Fabric"',response.text)
         self.assertIn("Forge 會執行官方無介面安裝器",response.text)
         self.assertIn("backups/cores",response.text)
+        self.assertIn('<details class="advanced-settings">',response.text)
+        self.assertIn('id="advanced"',response.text)
 
     def test_java_runtime_parses_legacy_java_8_version_string(self):
         result = type("Result", (), {"stdout": "", "stderr": 'java version "1.8.0_452"'})()
@@ -487,13 +489,14 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertIn("停止伺服器",running.json()["detail"])
 
     def test_responsive_layout_styles_are_shared_across_management_pages(self):
-        paths=("/",f"/server/{self.profile_id}",f"/server/{self.profile_id}/files",f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/monitor")
+        paths=("/",f"/server/{self.profile_id}",f"/server/{self.profile_id}/files",f"/server/{self.profile_id}/backups",f"/server/{self.profile_id}/players",f"/server/{self.profile_id}/schedules",f"/server/{self.profile_id}/settings",f"/server/{self.profile_id}/monitor","/admin/users")
         for path in paths:
             response=self.client.get(path)
             self.assertEqual(response.status_code,200,(path,response.text[:300]))
             self.assertIn('name="viewport" content="width=device-width, initial-scale=1"',response.text)
-            self.assertIn("@media(max-width:640px)",response.text)
-            self.assertIn("overflow-x:auto",response.text)
+            css=response.text.replace(" ","").replace("\n","")
+            self.assertIn("@media(max-width:640px)",css)
+            self.assertIn("overflow-x:auto",css)
 
     def test_start_api_explains_java_25_requirement_before_launch(self):
         directory=Path(self.temp.name)/"minecraft-26-1"

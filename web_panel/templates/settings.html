@@ -41,9 +41,13 @@
         <label>啟動檔案</label><input name="launcher" value="{{ profile.launcher }}" placeholder="server.jar 或 fabric-server-launch.jar">
       </div>
     </div>
-    <label>進階 server.properties（每行 key=value）</label>
-    <textarea id="advanced">{% for key,value in properties.items() %}{{ key }}={{ value }}
+    <details class="advanced-settings">
+      <summary>進階 server.properties 編輯器</summary>
+      <p class="muted small">直接編輯原始 key=value 設定；一般設定可使用上方欄位。儲存時會保留未列於表單的其他屬性。</p>
+      <label for="advanced">每行一個 key=value</label>
+      <textarea id="advanced">{% for key,value in properties.items() %}{{ key }}={{ value }}
 {% endfor %}</textarea>
+    </details>
     <div class="actions"><button type="submit">儲存設定</button><a class="button secondary" href="/server/{{ profile.id }}">取消</a></div>
     <p id="result" class="muted" role="status"></p>
   </form>
@@ -64,7 +68,7 @@
   <section class="card"><h2>變更 Minecraft 版本</h2><p class="muted">你沒有「修改啟動參數」權限，無法變更伺服器核心版本。</p></section>
   {% endif %}
 </main>
-<style>.core-update-card{margin-top:16px}.core-update-status{margin-top:12px;overflow-wrap:anywhere}.core-update-status progress{display:block;width:100%;height:18px;margin-top:8px}.java-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}#java-auto-status{margin:8px 0;overflow-wrap:anywhere}.java-progress-wrap progress{display:block;width:100%;height:18px;margin:6px 0}.java-progress-wrap span{overflow-wrap:anywhere}</style>
+<style>.advanced-settings{margin:18px 0;padding:14px;border:1px solid var(--border);border-radius:12px;background:rgba(13,22,32,.56)}.advanced-settings summary{font-weight:700}.advanced-settings[open] summary{margin-bottom:8px;color:var(--accent)}.advanced-settings p{margin:8px 0 12px}.core-update-card{margin-top:16px}.core-update-status{margin-top:12px;overflow-wrap:anywhere}.core-update-status progress{display:block;width:100%;height:18px;margin-top:8px}.java-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}#java-auto-status{margin:8px 0;overflow-wrap:anywhere}.java-progress-wrap progress{display:block;width:100%;height:18px;margin:6px 0}.java-progress-wrap span{overflow-wrap:anywhere}</style>
 <script>
 const id={{ profile.id }},csrf={{ csrf|tojson }};
 const form=document.getElementById('settings-form');
