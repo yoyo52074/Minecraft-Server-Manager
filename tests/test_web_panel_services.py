@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from web_panel.database import WebDatabase
 from web_panel.file_service import SafeFileService
-from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore, normalize_panel_url
+from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
 from web_panel.core_update import CoreUpdateJobs
 from core_metadata import java_requirement_for_core, minimum_java_version
 from world_lock import is_world_locked
@@ -693,58 +693,35 @@ time.sleep(30)
         self.store.delete(profile["id"])
         self.assertIsNone(self.store.get(profile["id"]))
 
-    def test_playit_primary_and_backup_addresses_validate_and_persist(self):
-        profile = self.store.create("Playit addresses", Path(self.temp.name) / "playit-addresses", "Paper")
-        updated = self.store.update(profile["id"], {
-            "playit_primary_address": "main.example.ply.gg:25565",
-            "playit_backup_address": "[2001:db8::1]:30456",
-        })
-        self.assertEqual(updated["playit_primary_address"], "main.example.ply.gg:25565")
-        self.assertEqual(updated["playit_backup_address"], "[2001:db8::1]:30456")
-        for invalid in ("https://example.ply.gg", "host.example:70000", "host.example:abc", "bad host:25565"):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                self.store.update(profile["id"], {"playit_primary_address": invalid})
-
-    def test_panel_playit_urls_validate_http_hosts_ports_and_ipv6(self):
-        self.assertEqual(normalize_panel_url("main.example.ply.gg:12345"), "http://main.example.ply.gg:12345")
-        self.assertEqual(normalize_panel_url("https://panel.example.com/"), "https://panel.example.com")
-        self.assertEqual(normalize_panel_url("https://[2001:db8::1]:8443"), "https://[2001:db8::1]:8443")
-        self.assertEqual(normalize_panel_url(""), "")
-        invalid_urls = (
-            "ftp://panel.example.com", "https://user:pass@example.com", "https://example.com/admin",
-            "https://@example.com", "https://example.com?x=1", "https://example.com:",
-            "javascript:alert(1)", "panel.example.com:70000", "bad host.example",
-        )
-        for invalid in invalid_urls:
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                normalize_panel_url(invalid)
-
-    def test_panel_playit_settings_persist_globally(self):
-        self.assertEqual(
-            self.db.panel_connection_settings(),
-            {"primary_address": "", "backup_address": "", "playit_autostart": False},
-        )
-        self.db.set_panel_connection_settings("https://main.example.com", "http://backup.example.ply.gg:12345", True)
-        reopened = WebDatabase(self.db.path)
-        self.assertEqual(
-            reopened.panel_connection_settings(),
-            {
-                "primary_address": "https://main.example.com",
-                "backup_address": "http://backup.example.ply.gg:12345",
-                "playit_autostart": True,
-            },
-        )
-
-    def test_playit_address_columns_migrate_for_existing_profiles(self):
+    def test_retired_tunnel_settings_are_removed_during_migration(self):
         profile = self.store.create("Legacy profile", Path(self.temp.name) / "legacy-profile", "Paper")
         with self.db._connect() as conn:
-            conn.execute("ALTER TABLE server_profiles DROP COLUMN playit_primary_address")
-            conn.execute("ALTER TABLE server_profiles DROP COLUMN playit_backup_address")
+            conn.execute("ALTER TABLE server_profiles ADD COLUMN playit_primary_address TEXT NOT NULL DEFAULT ''")
+            conn.execute("ALTER TABLE server_profiles ADD COLUMN playit_backup_address TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "UPDATE server_profiles SET playit_primary_address=?, playit_backup_address=? WHERE id=?",
+                ("old-primary.example", "old-backup.example", profile["id"]),
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO system_metadata(key,value) VALUES(?,?)",
+                (("panel_playit_primary_address", "old-primary.example"),
+                 ("panel_playit_backup_address", "old-backup.example"),
+                 ("panel_playit_autostart", "1")),
+            )
 
-        migrated_store = ServerProfileStore(self.db)
+        migrated_db = WebDatabase(self.db.path)
+        migrated_store = ServerProfileStore(migrated_db)
         migrated = migrated_store.get(profile["id"])
-        self.assertEqual(migrated["playit_primary_address"], "")
-        self.assertEqual(migrated["playit_backup_address"], "")
+        columns = {row[1] for row in migrated_db._connect().execute("PRAGMA table_info(server_profiles)")}
+        self.assertNotIn("playit_primary_address", columns)
+        self.assertNotIn("playit_backup_address", columns)
+        self.assertNotIn("playit_primary_address", migrated)
+        self.assertNotIn("playit_backup_address", migrated)
+        with migrated_db._connect() as conn:
+            remaining = conn.execute(
+                "SELECT key FROM system_metadata WHERE key LIKE 'panel_playit_%'"
+            ).fetchall()
+        self.assertEqual(remaining, [])
 
     def test_server_permissions_default_deny_and_assign(self):
         profile = self.store.create("Protected", Path(self.temp.name) / "protected", "Paper")

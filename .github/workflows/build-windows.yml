@@ -30,7 +30,6 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name Minecraft-Server-Manager
           --icon my_logo.ico
-          --add-binary "playit.exe;."
           --collect-all ttkbootstrap
           --collect-all uvicorn
           --collect-all fastapi
@@ -55,7 +54,6 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --console
           --name Minecraft-Server-Manager-smoke
           --icon my_logo.ico
-          --add-binary "playit.exe;."
           --collect-all ttkbootstrap
           --collect-all uvicorn
           --collect-all fastapi

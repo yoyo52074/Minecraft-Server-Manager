@@ -22,16 +22,5 @@
     {% endif %}
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
   </section>
-  {% if panel_connections.primary_address or panel_connections.backup_address %}
-  <section class="card" aria-labelledby="panel-entry-title">
-    <h2 id="panel-entry-title">管理面板連線入口</h2>
-    <p class="muted">本機面板連接埠：<code>{{ panel_port }}</code>。如果目前網址無法連線，可手動改用另一個入口。</p>
-    <div class="grid">
-      <div><strong>主要入口</strong><p>{% if panel_connections.primary_address %}<a href="{{ panel_connections.primary_address }}" target="_blank" rel="noopener">{{ panel_connections.primary_address }}</a>{% else %}<span class="muted">尚未設定</span>{% endif %}</p></div>
-      <div><strong>備援入口</strong><p>{% if panel_connections.backup_address %}<a href="{{ panel_connections.backup_address }}" target="_blank" rel="noopener">{{ panel_connections.backup_address }}</a>{% else %}<span class="muted">尚未設定</span>{% endif %}</p></div>
-    </div>
-    <p class="small muted">這兩個網址仍連到同一台主機及同一個 Playit agent；只提供手動替代入口，不是主機備援，也不會自動切換。</p>
-  </section>
-  {% endif %}
 </main>
 {% endblock %}

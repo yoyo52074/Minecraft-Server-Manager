@@ -24,7 +24,6 @@ from .multi_server import (
     CoreAdapter,
     MultiServerManager,
     ServerProfileStore,
-    normalize_panel_url,
 )
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
 from .operations import MonitorService, PlayerManager, Scheduler
@@ -126,14 +125,6 @@ def create_app(controller, database_path):
 
     def render(request, template, **context):
         context.update({"user": current_user(request), "setup_required": db.user_count() == 0})
-        if template in {"dashboard.html", "login.html"}:
-            context.setdefault("panel_connections", db.panel_connection_settings())
-            context.setdefault("panel_port", getattr(controller, "web_panel_port", 8765))
-            process = getattr(controller, "playit_process", None)
-            try:
-                context.setdefault("panel_playit_running", bool(process and process.poll() is None))
-            except (OSError, AttributeError):
-                context.setdefault("panel_playit_running", False)
         return templates.TemplateResponse(request=request, name=template, context=context)
 
     def check_csrf(request: Request, user):
@@ -197,7 +188,7 @@ def create_app(controller, database_path):
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
         profile, _ = sync_server_port(profile)
-        return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=user["csrf_token"], can_edit_connection=db.has_server_permission(user, profile_id, "settings.edit"))
+        return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=user["csrf_token"])
 
     @app.get("/server/{profile_id}/settings", response_class=HTMLResponse)
     def settings_page(profile_id: int, request: Request):
@@ -333,45 +324,6 @@ def create_app(controller, database_path):
         profile, _ = sync_server_port(profile)
         profile["status"] = multi.status(profile_id)
         return profile
-
-    @app.put("/api/servers/{profile_id}/connection-addresses")
-    async def update_connection_addresses(profile_id: int, request: Request):
-        user = require_server_permission(request, profile_id, "settings.edit")
-        check_csrf(request, user)
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="連線地址格式錯誤")
-        updates = {}
-        if "primary_address" in payload:
-            updates["playit_primary_address"] = payload["primary_address"]
-        if "backup_address" in payload:
-            updates["playit_backup_address"] = payload["backup_address"]
-        try:
-            profile = profiles.update(profile_id, updates)
-        except (ValueError, KeyError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        db.audit(user["user_id"], "update_connection_addresses", str(profile_id), server_id=profile_id)
-        return {"ok": True, "primary_address": profile["playit_primary_address"], "backup_address": profile["playit_backup_address"]}
-
-    @app.put("/api/panel/connection-addresses")
-    async def update_panel_connection_addresses(request: Request):
-        user = require_user(request, {"admin"})
-        check_csrf(request, user)
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="面板連線設定格式錯誤")
-        current = db.panel_connection_settings()
-        try:
-            primary = normalize_panel_url(payload.get("primary_address", current["primary_address"]))
-            backup = normalize_panel_url(payload.get("backup_address", current["backup_address"]))
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        autostart = payload.get("playit_autostart", current["playit_autostart"])
-        if type(autostart) is not bool:
-            raise HTTPException(status_code=400, detail="Playit 自動啟動設定必須是布林值")
-        settings = db.set_panel_connection_settings(primary, backup, autostart)
-        db.audit(user["user_id"], "update_panel_connection_addresses", "更新面板入口與 Playit 自動啟動設定")
-        return {"ok": True, **settings, "restart_required": True}
 
     @app.patch("/api/servers/{profile_id}")
     async def update_server(profile_id: int, request: Request):

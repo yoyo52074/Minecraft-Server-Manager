@@ -66,16 +66,8 @@ class ApplicationController:
         self._server_output_thread = None
         self._closing_after_stop = False
         self._close_wait_started = None
-        self.playit_process = None
-        self.panel_playit_autostart = False
         self.server_started_at = None
-        if getattr(sys, "frozen", False):
-            self.playit_executable_path = os.path.join(sys._MEIPASS, "playit.exe")
-        else:
-            self.playit_executable_path = os.path.join(self.app_directory, "playit.exe")
         self.start_web_panel()
-        if self.panel_playit_autostart and self.web_server and self.web_thread:
-            self.root.after(250, self.start_playit_tunnel)
         self.root.after(100, self.initialize)
 
     def start_web_panel(self):
@@ -88,7 +80,6 @@ class ApplicationController:
             from uvicorn import Config, Server
 
             app = create_app(self, os.path.join(self.app_directory, "web_panel.db"))
-            self.panel_playit_autostart = app.state.db.panel_connection_settings()["playit_autostart"]
             self.web_server = Server(Config(
                 app,
                 host=self.web_panel_host,
@@ -183,47 +174,6 @@ class ApplicationController:
         except Exception as exc:
             self.log(f"還原備份失敗：{exc}", "error")
             messagebox.showerror("還原失敗", str(exc))
-
-    def start_playit_tunnel(self):
-        if self.playit_process and self.playit_process.poll() is None:
-            return
-        if not os.path.exists(self.playit_executable_path):
-            self.log("錯誤：找不到捆綁的 playit.exe 檔案！", "error")
-            messagebox.showerror(
-                "內部錯誤",
-                "找不到 playit.exe，請確認程式打包是否正確，\n且已包含 playit.exe 檔案。",
-            )
-            self.root.playit_enabled.set(False)
-            return
-
-        self.log("正在新視窗中啟動 Playit.gg...", "info")
-        self.root.playit_address_label.config(text="請查看彈出的視窗")
-        try:
-            self.playit_process = subprocess.Popen(
-                [self.playit_executable_path],
-                cwd=os.path.dirname(self.playit_executable_path),
-                creationflags=subprocess.CREATE_NEW_CONSOLE
-                if sys.platform == "win32"
-                else 0,
-            )
-        except OSError as exc:
-            self.playit_process = None
-            self.root.playit_enabled.set(False)
-            self.log(f"啟動 Playit.gg 失敗：{exc}", "error")
-            messagebox.showerror("錯誤", f"啟動 Playit.gg 失敗：{exc}")
-
-    def stop_playit_tunnel(self, force=False):
-        if self.panel_playit_autostart and not force:
-            return
-        self.log("正在關閉 Playit.gg 通道...", "warn")
-        if self.playit_process and self.playit_process.poll() is None:
-            self.playit_process.terminate()
-            try:
-                self.playit_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.playit_process.kill()
-        self.playit_process = None
-        self.root.playit_address_label.config(text="已中斷連線")
 
     def get_application_path(self):
         if getattr(sys, "frozen", False):
@@ -734,8 +684,6 @@ class ApplicationController:
             return
         for warning in diagnostics["warnings"]:
             self.log(f"啟動警告：{warning}", "warn")
-        if self.root.playit_enabled.get():
-            self.start_playit_tunnel()
         ram = self.root.ram_spinbox.get()
         java_command = [
             self.java_executable_path,
@@ -823,8 +771,6 @@ class ApplicationController:
         self.check_existing_server()
 
     def stop_server(self):
-        if self.root.playit_enabled.get():
-            self.stop_playit_tunnel()
         if self.server_process and self.server_process.poll() is None:
             self.log("正在向伺服器發送 'stop' 指令...", "warn")
             self.server_process.stdin.write("stop\n")
@@ -869,8 +815,6 @@ class ApplicationController:
         self._finish_application_close()
 
     def _finish_application_close(self):
-        if self.playit_process:
-            self.stop_playit_tunnel(force=True)
         self.stop_web_panel()
         self.root.destroy()
 

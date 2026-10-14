@@ -31,7 +31,7 @@
 
 - 技術：Python、Tkinter/ttkbootstrap、requests。
 - 目前是單機桌面應用，依賴只有 `requests` 與 `ttkbootstrap`。
-- `main.py` 的 `ApplicationController` 同時負責 UI 綁定、啟動/停止 Java、讀取主控台、設定、備份及 Playit.gg。
+- `main.py` 的 `ApplicationController` 同時負責 UI 綁定、啟動/停止 Java、讀取主控台、設定及備份。
 - `server_manager.py` 目前主要負責核心版本、下載與 `server.properties`，尚未負責程序生命週期。
 - Java 程序目前在 `main.py` 直接以 `subprocess.Popen` 建立；標準輸出由背景執行緒讀取。
 - 現有設定已有 `server-port`，預設 Minecraft 連接埠通常是 `25565`；網頁面板應使用另一個連接埠，例如 `8765`。

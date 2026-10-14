@@ -27,7 +27,7 @@ COLORS = {
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器管理器 v3.0.7 - Produced by yoyo")
+        self.title("Minecraft 伺服器管理器 v3.0.8 - Produced by yoyo")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self._pages = {}
@@ -321,7 +321,7 @@ class MainAppWindow(ttk.Window):
 
         # ── Control buttons ──
         control_card, control_inner = self._create_card(body, "快速操作")
-        control_card.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
+        control_card.grid(row=2, column=0, columnspan=2, sticky="nsew")
         control_inner.columnconfigure(0, weight=1)
         control_inner.columnconfigure(1, weight=1)
 
@@ -367,28 +367,6 @@ class MainAppWindow(ttk.Window):
             bg=COLORS["bg_card"],
         )
         self.uptime_label.grid(row=0, column=2, sticky="e")
-
-        # ── Playit card ──
-        playit_card, playit_inner = self._create_card(body, "Playit.gg 公開連線")
-        playit_card.grid(row=2, column=1, sticky="nsew", pady=(0, 14))
-
-        self.playit_enabled = tk.BooleanVar()
-        self.playit_checkbox = ttk.Checkbutton(
-            playit_inner,
-            text="啟用公開連線",
-            variable=self.playit_enabled,
-            bootstyle="info-round-toggle",
-        )
-        self.playit_checkbox.pack(anchor="w", pady=(0, 14))
-        self.playit_address_label = tk.Label(
-            playit_inner,
-            text="○ Agent 尚未啟動\n面板隧道自動啟動可於 Web 面板首頁設定\n啟動遊戲伺服器時可勾選公開連線",
-            justify=tk.LEFT,
-            font=("Segoe UI", 10),
-            fg=COLORS["text_secondary"],
-            bg=COLORS["bg_card"],
-        )
-        self.playit_address_label.pack(anchor="w")
 
     def _create_button(self, parent, text, color, state="normal"):
         """Create a styled button with the given color."""
@@ -891,7 +869,7 @@ class AboutWindow(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text="版本：v3.0.7",
+            text="版本：v3.0.8",
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
