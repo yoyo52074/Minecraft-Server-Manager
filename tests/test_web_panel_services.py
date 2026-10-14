@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from web_panel.database import WebDatabase
 from web_panel.file_service import SafeFileService
-from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
+from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore, normalize_panel_url
 from web_panel.core_update import CoreUpdateJobs
 from core_metadata import java_requirement_for_core, minimum_java_version
 from world_lock import is_world_locked
@@ -704,6 +704,36 @@ time.sleep(30)
         for invalid in ("https://example.ply.gg", "host.example:70000", "host.example:abc", "bad host:25565"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 self.store.update(profile["id"], {"playit_primary_address": invalid})
+
+    def test_panel_playit_urls_validate_http_hosts_ports_and_ipv6(self):
+        self.assertEqual(normalize_panel_url("main.example.ply.gg:12345"), "http://main.example.ply.gg:12345")
+        self.assertEqual(normalize_panel_url("https://panel.example.com/"), "https://panel.example.com")
+        self.assertEqual(normalize_panel_url("https://[2001:db8::1]:8443"), "https://[2001:db8::1]:8443")
+        self.assertEqual(normalize_panel_url(""), "")
+        invalid_urls = (
+            "ftp://panel.example.com", "https://user:pass@example.com", "https://example.com/admin",
+            "https://@example.com", "https://example.com?x=1", "https://example.com:",
+            "javascript:alert(1)", "panel.example.com:70000", "bad host.example",
+        )
+        for invalid in invalid_urls:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                normalize_panel_url(invalid)
+
+    def test_panel_playit_settings_persist_globally(self):
+        self.assertEqual(
+            self.db.panel_connection_settings(),
+            {"primary_address": "", "backup_address": "", "playit_autostart": False},
+        )
+        self.db.set_panel_connection_settings("https://main.example.com", "http://backup.example.ply.gg:12345", True)
+        reopened = WebDatabase(self.db.path)
+        self.assertEqual(
+            reopened.panel_connection_settings(),
+            {
+                "primary_address": "https://main.example.com",
+                "backup_address": "http://backup.example.ply.gg:12345",
+                "playit_autostart": True,
+            },
+        )
 
     def test_playit_address_columns_migrate_for_existing_profiles(self):
         profile = self.store.create("Legacy profile", Path(self.temp.name) / "legacy-profile", "Paper")

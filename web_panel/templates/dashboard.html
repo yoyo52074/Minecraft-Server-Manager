@@ -8,6 +8,28 @@
   </header>
   <p class="muted"><span id="live">● 即時連線中</span></p>
 
+  <section id="panel-playit-connections" class="card" aria-labelledby="panel-playit-title">
+    <h2 id="panel-playit-title">管理面板 Playit.gg 連線入口</h2>
+    <p class="muted">本機面板連接埠：<code>{{ panel_port }}</code>。請先在 Playit.gg 控制台建立兩條 Web tunnel，兩者都轉送至此主機的 <code>127.0.0.1:{{ panel_port }}</code>；本程式不會替你建立 Playit tunnel。</p>
+    <div class="grid">
+      <div><strong>主要入口</strong><p>{% if panel_connections.primary_address %}<a id="panel-primary-link" href="{{ panel_connections.primary_address }}" target="_blank" rel="noopener">{{ panel_connections.primary_address }}</a>{% else %}<span class="muted">尚未設定</span>{% endif %}</p></div>
+      <div><strong>備援入口</strong><p>{% if panel_connections.backup_address %}<a id="panel-backup-link" href="{{ panel_connections.backup_address }}" target="_blank" rel="noopener">{{ panel_connections.backup_address }}</a>{% else %}<span class="muted">尚未設定</span>{% endif %}</p></div>
+    </div>
+    <p class="small muted">頁面載入時的 Playit agent 程序狀態：{{ '運行中' if panel_playit_running else '未運行' }}（僅代表程序狀態，不代表 tunnel 可達）。兩條入口都指向同一主機；主機、面板程序或共用 agent 故障時兩者都會中斷，需手動改用備援網址，並非獨立主機備援或自動切換。</p>
+    {% if user.role == 'admin' %}
+    <details>
+      <summary>管理面板入口與 Playit 啟動設定</summary>
+      <div class="grid">
+        <div><label for="panel-primary-address">主要面板網址</label><input id="panel-primary-address" maxlength="500" value="{{ panel_connections.primary_address }}" placeholder="https://main.example.com 或 main.example.ply.gg:12345"></div>
+        <div><label for="panel-backup-address">備援面板網址</label><input id="panel-backup-address" maxlength="500" value="{{ panel_connections.backup_address }}" placeholder="https://backup.example.com 或 backup.example.ply.gg:12345"></div>
+      </div>
+      <label><input id="panel-playit-autostart" type="checkbox" {% if panel_connections.playit_autostart %}checked{% endif %}> 啟動管理器時自動啟動 Playit agent（儲存後下次重開程式生效）</label>
+      <p class="small muted">第一次使用需先在 Playit.gg 完成 agent 認領，並將兩條 tunnel 都設定為轉送到上方顯示的本機連接埠。自動啟動會啟動同一個 agent 設定中的所有 tunnel（包含其他 Minecraft tunnel），此頁無法分別啟停單一 tunnel。</p>
+      <div class="actions"><button type="button" onclick="savePanelConnections()">儲存面板連線設定</button><span id="panel-connection-message" class="muted" role="status" aria-live="polite"></span></div>
+    </details>
+    {% endif %}
+  </section>
+
   {% if user.role == 'admin' and node_resources %}
   <section id="cluster-resources" class="card node-overview" aria-labelledby="cluster-title">
     <div class="node-overview-head">
@@ -107,6 +129,7 @@
 <script>
 const csrf=document.cookie.split('; ').find(x=>x.startsWith('mcm_csrf='))?.split('=')[1]||'';
 async function api(url,opts={}){opts.headers={...(opts.headers||{}),'x-csrf-token':csrf,'content-type':'application/json'};return(await fetch(url,opts)).json()}
+async function savePanelConnections(){const message=document.getElementById('panel-connection-message');try{const response=await fetch('/api/panel/connection-addresses',{method:'PUT',headers:{'x-csrf-token':csrf,'content-type':'application/json'},body:JSON.stringify({primary_address:document.getElementById('panel-primary-address').value,backup_address:document.getElementById('panel-backup-address').value,playit_autostart:document.getElementById('panel-playit-autostart').checked})});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));message.textContent='設定已儲存；Playit 自動啟動設定將於下次重新啟動管理器時生效。';message.className='muted';setTimeout(()=>location.reload(),700)}catch(error){message.textContent='儲存失敗：'+error.message;message.className='error'}}
 function openServer(id){location.href='/server/'+id}
 function phaseLabel(item){return item.phase==='running'?'● 運行中':item.phase==='starting'?'● 啟動中':item.phase==='stopping'?'● 停止中':item.phase==='error'?'● 啟動失敗':'● 已停止'}
 function updateCards(list){for(const item of list){const card=document.getElementById('server-card-'+item.id);if(!card)continue;const status=card.querySelector('[data-status]');status.textContent=phaseLabel(item);status.className='status '+(item.phase==='running'?'online':item.phase==='error'?'offline':'');card.querySelector('[data-port]').textContent=item.server_port??'—';card.querySelector('[data-cpu]').textContent=item.metrics?.cpu_percent??0;card.querySelector('[data-memory]').textContent=item.metrics?.memory_mb??0}}

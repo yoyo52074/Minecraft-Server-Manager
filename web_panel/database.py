@@ -44,6 +44,39 @@ class WebDatabase:
             else:
                 db.execute("DELETE FROM system_metadata WHERE key=?", (key,))
 
+    def panel_connection_settings(self):
+        keys = {
+            "primary_address": "panel_playit_primary_address",
+            "backup_address": "panel_playit_backup_address",
+            "playit_autostart": "panel_playit_autostart",
+        }
+        with self._connect() as db:
+            rows = {
+                row["key"]: row["value"]
+                for row in db.execute(
+                    "SELECT key,value FROM system_metadata WHERE key IN (?,?,?)",
+                    tuple(keys.values()),
+                )
+            }
+        return {
+            "primary_address": rows.get(keys["primary_address"], ""),
+            "backup_address": rows.get(keys["backup_address"], ""),
+            "playit_autostart": rows.get(keys["playit_autostart"], "0") == "1",
+        }
+
+    def set_panel_connection_settings(self, primary_address, backup_address, playit_autostart):
+        values = (
+            ("panel_playit_primary_address", str(primary_address or "")),
+            ("panel_playit_backup_address", str(backup_address or "")),
+            ("panel_playit_autostart", "1" if playit_autostart else "0"),
+        )
+        with self._connect() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO system_metadata(key,value) VALUES(?,?)",
+                values,
+            )
+        return self.panel_connection_settings()
+
     def _init_schema(self):
         with self._connect() as db:
             db.executescript(

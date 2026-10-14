@@ -9,6 +9,7 @@ import time
 import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit, urlunsplit
 
 from core_metadata import java_requirement_for_core, java_version_compatible
 from world_lock import WorldLockProbeError, is_world_locked
@@ -72,6 +73,40 @@ def normalize_connection_address(value):
             ):
                 raise ValueError("連線地址請輸入網域名稱或 IP，可加上 :連接埠")
     return address
+
+
+def normalize_panel_url(value):
+    address = str(value or "").strip()
+    if not address:
+        return ""
+    if len(address) > 500 or any(char.isspace() for char in address):
+        raise ValueError("面板網址格式不正確")
+    if "://" not in address:
+        address = "http://" + address
+    try:
+        parsed = urlsplit(address)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("面板網址格式不正確") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or parsed.username is not None or parsed.password is not None:
+        raise ValueError("面板網址只允許 http 或 https，且不可包含帳號密碼")
+    if not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("面板網址只可輸入主機名稱與選填連接埠，不可加入路徑或參數")
+    if parsed.netloc.endswith(":"):
+        raise ValueError("面板網址連接埠不可留空")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("面板網址連接埠必須介於 1 到 65535")
+    host = parsed.hostname
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.rstrip(".").split(".")
+        if len(host) > 253 or any(
+            not label or len(label) > 63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("面板網址請輸入有效網域名稱或 IP 地址")
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, "", "", ""))
 
 
 class CoreAdapter:

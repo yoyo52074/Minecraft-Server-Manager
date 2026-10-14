@@ -67,12 +67,15 @@ class ApplicationController:
         self._closing_after_stop = False
         self._close_wait_started = None
         self.playit_process = None
+        self.panel_playit_autostart = False
         self.server_started_at = None
         if getattr(sys, "frozen", False):
             self.playit_executable_path = os.path.join(sys._MEIPASS, "playit.exe")
         else:
             self.playit_executable_path = os.path.join(self.app_directory, "playit.exe")
         self.start_web_panel()
+        if self.panel_playit_autostart and self.web_server and self.web_thread:
+            self.root.after(250, self.start_playit_tunnel)
         self.root.after(100, self.initialize)
 
     def start_web_panel(self):
@@ -85,6 +88,7 @@ class ApplicationController:
             from uvicorn import Config, Server
 
             app = create_app(self, os.path.join(self.app_directory, "web_panel.db"))
+            self.panel_playit_autostart = app.state.db.panel_connection_settings()["playit_autostart"]
             self.web_server = Server(Config(
                 app,
                 host=self.web_panel_host,
@@ -181,6 +185,8 @@ class ApplicationController:
             messagebox.showerror("還原失敗", str(exc))
 
     def start_playit_tunnel(self):
+        if self.playit_process and self.playit_process.poll() is None:
+            return
         if not os.path.exists(self.playit_executable_path):
             self.log("錯誤：找不到捆綁的 playit.exe 檔案！", "error")
             messagebox.showerror(
@@ -206,7 +212,9 @@ class ApplicationController:
             self.log(f"啟動 Playit.gg 失敗：{exc}", "error")
             messagebox.showerror("錯誤", f"啟動 Playit.gg 失敗：{exc}")
 
-    def stop_playit_tunnel(self):
+    def stop_playit_tunnel(self, force=False):
+        if self.panel_playit_autostart and not force:
+            return
         self.log("正在關閉 Playit.gg 通道...", "warn")
         if self.playit_process and self.playit_process.poll() is None:
             self.playit_process.terminate()
@@ -862,7 +870,7 @@ class ApplicationController:
 
     def _finish_application_close(self):
         if self.playit_process:
-            self.stop_playit_tunnel()
+            self.stop_playit_tunnel(force=True)
         self.stop_web_panel()
         self.root.destroy()
 

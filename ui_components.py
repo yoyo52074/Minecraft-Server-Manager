@@ -27,7 +27,7 @@ COLORS = {
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器管理器 v3.0.6 - Produced by yoyo")
+        self.title("Minecraft 伺服器管理器 v3.0.7 - Produced by yoyo")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self._pages = {}
@@ -382,7 +382,7 @@ class MainAppWindow(ttk.Window):
         self.playit_checkbox.pack(anchor="w", pady=(0, 14))
         self.playit_address_label = tk.Label(
             playit_inner,
-            text="○ 尚未啟動\n請在啟動伺服器時開啟",
+            text="○ Agent 尚未啟動\n面板隧道自動啟動可於 Web 面板首頁設定\n啟動遊戲伺服器時可勾選公開連線",
             justify=tk.LEFT,
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
@@ -891,7 +891,7 @@ class AboutWindow(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text="版本：v3.0.6",
+            text="版本：v3.0.7",
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],
