@@ -1,5 +1,6 @@
-import os
+import ipaddress
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,53 @@ EULA_REQUIRED_MESSAGE = (
     "請確認同意後再啟動。"
 )
 WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
+def normalize_connection_address(value):
+    address = str(value or "").strip()
+    if not address:
+        return ""
+    if len(address) > 300 or any(char.isspace() for char in address) or any(char in address for char in "/\\?#@"):
+        raise ValueError("連線地址格式不正確")
+    if address.startswith("["):
+        end = address.find("]")
+        if end < 0:
+            raise ValueError("IPv6 地址請使用 [IPv6]:連接埠 格式")
+        host = address[1:end]
+        try:
+            if ipaddress.ip_address(host).version != 6:
+                raise ValueError("括號內必須是 IPv6 地址")
+        except ValueError as exc:
+            raise ValueError("括號內必須是有效的 IPv6 地址") from exc
+        suffix = address[end + 1:]
+        if suffix and not suffix.startswith(":"):
+            raise ValueError("連線地址格式不正確")
+        port = suffix[1:] if suffix else ""
+        if suffix == ":":
+            raise ValueError("連接埠不可留空")
+    else:
+        if address.count(":") > 1:
+            raise ValueError("IPv6 地址請使用 [IPv6]:連接埠 格式")
+        host, separator, port = address.partition(":")
+        if separator and not port:
+            raise ValueError("連接埠不可留空")
+        if not separator:
+            port = ""
+    if port and (not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535):
+        raise ValueError("連接埠必須介於 1 到 65535")
+    if not host:
+        raise ValueError("連線地址不可只有連接埠")
+    if not address.startswith("["):
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            labels = host.rstrip(".").split(".")
+            if len(host) > 253 or any(
+                not label or len(label) > 63 or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+                for label in labels
+            ):
+                raise ValueError("連線地址請輸入網域名稱或 IP，可加上 :連接埠")
+    return address
 
 
 class CoreAdapter:
@@ -220,6 +268,8 @@ class ServerProfileStore:
                     min_memory INTEGER NOT NULL DEFAULT 1024,
                     max_memory INTEGER NOT NULL DEFAULT 2048,
                     server_port INTEGER NOT NULL DEFAULT 25565,
+                    playit_primary_address TEXT NOT NULL DEFAULT '',
+                    playit_backup_address TEXT NOT NULL DEFAULT '',
                     launcher TEXT NOT NULL DEFAULT '',
                     auto_restart INTEGER NOT NULL DEFAULT 0,
                     enabled INTEGER NOT NULL DEFAULT 1,
@@ -228,6 +278,10 @@ class ServerProfileStore:
                 )
                 """
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(server_profiles)").fetchall()}
+            for column in ("playit_primary_address", "playit_backup_address"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE server_profiles ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             # Upgrade pre-existing history using each profile's configured memory limit.
             conn.execute("""UPDATE resource_metrics
                 SET memory_limit_mb=COALESCE((SELECT max_memory FROM server_profiles WHERE id=resource_metrics.server_id),0),
@@ -302,8 +356,11 @@ class ServerProfileStore:
         current = self.get(profile_id)
         if not current:
             raise KeyError("找不到伺服器")
-        allowed = {"name", "directory", "core_type", "minecraft_version", "java_path", "min_memory", "max_memory", "server_port", "launcher", "auto_restart", "enabled"}
+        allowed = {"name", "directory", "core_type", "minecraft_version", "java_path", "min_memory", "max_memory", "server_port", "launcher", "auto_restart", "enabled", "playit_primary_address", "playit_backup_address"}
         values = {key: value for key, value in values.items() if key in allowed}
+        for key in ("playit_primary_address", "playit_backup_address"):
+            if key in values:
+                values[key] = normalize_connection_address(values[key])
         if "core_type" in values and values["core_type"] not in CORE_TYPES:
             raise ValueError("不支援的伺服器核心")
         if "directory" in values:
@@ -318,7 +375,8 @@ class ServerProfileStore:
             return current
         values["updated_at"] = self.db._now()
         fields = ("name", "directory", "core_type", "minecraft_version", "java_path", "min_memory",
-                  "max_memory", "server_port", "launcher", "auto_restart", "enabled")
+                  "max_memory", "server_port", "launcher", "auto_restart", "enabled",
+                  "playit_primary_address", "playit_backup_address")
         parameters = []
         for field in fields:
             parameters.extend((int(field in values), values.get(field)))
@@ -336,6 +394,8 @@ class ServerProfileStore:
                 launcher=CASE WHEN ? THEN ? ELSE launcher END,
                 auto_restart=CASE WHEN ? THEN ? ELSE auto_restart END,
                 enabled=CASE WHEN ? THEN ? ELSE enabled END,
+                playit_primary_address=CASE WHEN ? THEN ? ELSE playit_primary_address END,
+                playit_backup_address=CASE WHEN ? THEN ? ELSE playit_backup_address END,
                 updated_at=? WHERE id=?""", parameters)
         return self.get(profile_id)
 

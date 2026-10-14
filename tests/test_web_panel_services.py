@@ -538,6 +538,46 @@ time.sleep(30)
             service.upload_chunk(profile["id"], uuid.uuid4().hex, "plugins/test.jar", 0,
                                  b"x" * (8 * 1024 * 1024 + 1), False, "error")
 
+    def test_file_list_returns_files_and_directories(self):
+        profile = self.store.create("File listing", Path(self.temp.name) / "file-listing", "Paper")
+        service = SafeFileService(self.store)
+        root = Path(profile["directory"])
+        (root / "server.properties").write_text("server-port=25565\n", encoding="utf-8")
+        (root / "world").mkdir()
+
+        items = {item["name"]: item for item in service.list(profile["id"])}
+
+        self.assertIn("server.properties", items)
+        self.assertFalse(items["server.properties"]["is_directory"])
+        self.assertEqual(items["server.properties"]["size"], len("server-port=25565\n"))
+        self.assertIn("world", items)
+        self.assertTrue(items["world"]["is_directory"])
+
+    def test_locked_file_does_not_hide_other_file_list_entries(self):
+        profile = self.store.create("Locked file listing", Path(self.temp.name) / "locked-file-listing", "Paper")
+        service = SafeFileService(self.store)
+        root = Path(profile["directory"])
+        locked = root / "locked.properties"
+        locked.write_text("motd=busy\n", encoding="utf-8")
+        (root / "server.properties").write_text("server-port=25565\n", encoding="utf-8")
+        (root / "world").mkdir()
+        original_stat = Path.stat
+
+        def fail_for_locked_file(path, *args, **kwargs):
+            if path == locked:
+                raise PermissionError("simulated file-in-use error")
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", new=fail_for_locked_file):
+            items = {item["name"]: item for item in service.list(profile["id"])}
+
+        self.assertIn("locked.properties", items)
+        self.assertTrue(items["locked.properties"]["unreadable"])
+        self.assertIn("server.properties", items)
+        self.assertFalse(items["server.properties"]["unreadable"])
+        self.assertIn("world", items)
+        self.assertTrue(items["world"]["is_directory"])
+
     def test_file_search_batch_and_conflict_policies(self):
         profile = self.store.create("Files", Path(self.temp.name) / "files", "Paper")
         service = SafeFileService(self.store)
@@ -652,6 +692,29 @@ time.sleep(30)
         self.assertEqual(updated["core_type"], "Forge")
         self.store.delete(profile["id"])
         self.assertIsNone(self.store.get(profile["id"]))
+
+    def test_playit_primary_and_backup_addresses_validate_and_persist(self):
+        profile = self.store.create("Playit addresses", Path(self.temp.name) / "playit-addresses", "Paper")
+        updated = self.store.update(profile["id"], {
+            "playit_primary_address": "main.example.ply.gg:25565",
+            "playit_backup_address": "[2001:db8::1]:30456",
+        })
+        self.assertEqual(updated["playit_primary_address"], "main.example.ply.gg:25565")
+        self.assertEqual(updated["playit_backup_address"], "[2001:db8::1]:30456")
+        for invalid in ("https://example.ply.gg", "host.example:70000", "host.example:abc", "bad host:25565"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.store.update(profile["id"], {"playit_primary_address": invalid})
+
+    def test_playit_address_columns_migrate_for_existing_profiles(self):
+        profile = self.store.create("Legacy profile", Path(self.temp.name) / "legacy-profile", "Paper")
+        with self.db._connect() as conn:
+            conn.execute("ALTER TABLE server_profiles DROP COLUMN playit_primary_address")
+            conn.execute("ALTER TABLE server_profiles DROP COLUMN playit_backup_address")
+
+        migrated_store = ServerProfileStore(self.db)
+        migrated = migrated_store.get(profile["id"])
+        self.assertEqual(migrated["playit_primary_address"], "")
+        self.assertEqual(migrated["playit_backup_address"], "")
 
     def test_server_permissions_default_deny_and_assign(self):
         profile = self.store.create("Protected", Path(self.temp.name) / "protected", "Paper")

@@ -268,12 +268,24 @@ class SafeFileService:
         if not directory.is_dir():
             raise NotADirectoryError("不是資料夾")
         items = []
-        visible=[path for path in directory.iterdir() if not _is_internal_component(path.name) and not _is_link_or_reparse(path)]
-        for path in sorted(visible, key=lambda item: (not item.is_dir(), item.name.lower())):
-            stat = path.stat()
-            items.append({"name": path.name, "path": path.relative_to(self.profile_root(profile_id)).as_posix(),
-                          "is_directory": path.is_dir(), "size": stat.st_size if path.is_file() else 0,
-                          "modified_at": stat.st_mtime})
+        for path in directory.iterdir():
+            if _is_internal_component(path.name):
+                continue
+            relative_path = path.relative_to(self.profile_root(profile_id)).as_posix()
+            try:
+                if _is_link_or_reparse(path):
+                    continue
+                info = path.stat()
+            except OSError:
+                items.append({"name": path.name, "path": relative_path, "is_directory": False,
+                              "size": None, "modified_at": None, "unreadable": True})
+                continue
+            is_directory = stat.S_ISDIR(info.st_mode)
+            is_regular_file = stat.S_ISREG(info.st_mode)
+            items.append({"name": path.name, "path": relative_path, "is_directory": is_directory,
+                          "size": info.st_size if is_regular_file else 0, "modified_at": info.st_mtime,
+                          "unreadable": not (is_directory or is_regular_file)})
+        items.sort(key=lambda item: (not item["is_directory"], item["name"].casefold()))
         return items
 
     def search(self, profile_id, query, relative="", content=False, limit=500, max_file_bytes=2 * 1024 * 1024):

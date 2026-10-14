@@ -183,12 +183,12 @@ def create_app(controller, database_path):
 
     @app.get("/server/{profile_id}", response_class=HTMLResponse)
     def server_page(profile_id: int, request: Request):
-        require_server_permission(request, profile_id, "server.view")
+        user = require_server_permission(request, profile_id, "server.view")
         profile = profiles.get(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="找不到伺服器")
         profile, _ = sync_server_port(profile)
-        return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=current_user(request)["csrf_token"])
+        return render(request, "server.html", profile=profile, status=multi.status(profile_id), csrf=user["csrf_token"], can_edit_connection=db.has_server_permission(user, profile_id, "settings.edit"))
 
     @app.get("/server/{profile_id}/settings", response_class=HTMLResponse)
     def settings_page(profile_id: int, request: Request):
@@ -324,6 +324,25 @@ def create_app(controller, database_path):
         profile, _ = sync_server_port(profile)
         profile["status"] = multi.status(profile_id)
         return profile
+
+    @app.put("/api/servers/{profile_id}/connection-addresses")
+    async def update_connection_addresses(profile_id: int, request: Request):
+        user = require_server_permission(request, profile_id, "settings.edit")
+        check_csrf(request, user)
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="連線地址格式錯誤")
+        updates = {}
+        if "primary_address" in payload:
+            updates["playit_primary_address"] = payload["primary_address"]
+        if "backup_address" in payload:
+            updates["playit_backup_address"] = payload["backup_address"]
+        try:
+            profile = profiles.update(profile_id, updates)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.audit(user["user_id"], "update_connection_addresses", str(profile_id), server_id=profile_id)
+        return {"ok": True, "primary_address": profile["playit_primary_address"], "backup_address": profile["playit_backup_address"]}
 
     @app.patch("/api/servers/{profile_id}")
     async def update_server(profile_id: int, request: Request):
@@ -833,7 +852,7 @@ def create_app(controller, database_path):
         require_server_permission(request, profile_id, "files.view")
         try:
             return {"path": path, "items": files.list(profile_id, path)}
-        except (PermissionError, FileNotFoundError, NotADirectoryError) as exc:
+        except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/server/{profile_id}/files", response_class=HTMLResponse)
