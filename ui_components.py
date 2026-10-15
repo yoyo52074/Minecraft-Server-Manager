@@ -27,7 +27,7 @@ COLORS = {
 class MainAppWindow(ttk.Window):
     def __init__(self, themename="darkly"):
         super().__init__(themename=themename)
-        self.title("Minecraft 伺服器管理器 v3.0.8 - Produced by yoyo")
+        self.title("Minecraft 伺服器管理器 v3.0.9 - Produced by yoyo")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self._pages = {}
@@ -869,7 +869,7 @@ class AboutWindow(tk.Toplevel):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text="版本：v3.0.8",
+            text="版本：v3.0.9",
             font=("Segoe UI", 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_dark"],

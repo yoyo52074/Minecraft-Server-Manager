@@ -553,6 +553,13 @@ time.sleep(30)
         self.assertIn("world", items)
         self.assertTrue(items["world"]["is_directory"])
 
+    def test_file_template_uses_flat_download_permission_key(self):
+        template = Path(__file__).resolve().parents[1] / "web_panel" / "templates" / "files.html"
+        source = template.read_text(encoding="utf-8")
+
+        self.assertIn("caps['files.download']", source)
+        self.assertNotIn("caps.files.download", source)
+
     def test_locked_file_does_not_hide_other_file_list_entries(self):
         profile = self.store.create("Locked file listing", Path(self.temp.name) / "locked-file-listing", "Paper")
         service = SafeFileService(self.store)
