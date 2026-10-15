@@ -4,6 +4,33 @@
 **審查範圍：** FastAPI Web 面板、登入／權限／Session／CSRF／WebSocket、伺服器檔案與備份、ZIP 還原、Java／核心下載、啟動程序、Webhook、Python 相依套件。  
 **審查方式：** 人工程式碼審查、Bandit、pip-audit、Python 單元／整合測試；本輪未對實際 Windows 主機或內網穿透端點執行外部滲透測試。
 
+## 補充審查：v3.1.0 安全候選版（2026-10-15）
+
+本補充記錄本次在 `release/v3.1.0-security` 分支完成的程式修改；本地 commit 為 `62e7965`，尚未推送、建立公開 Release 或做 Windows EXE 發布。
+
+### 本輪修補
+
+- 非管理員的 `settings.edit` 不能修改伺服器資料根目錄、核心類型、伺服器名稱或啟用狀態；變更啟動版本需 `settings.edit_startup`。
+- 所有 POST／PUT／PATCH／DELETE 請求由全域 middleware 驗證 Origin／Fetch Metadata；API CSRF 僅接受 `X-CSRF-Token` header，不再接受 `mcm_csrf` cookie 替代。首次管理員設定另外要求 loopback peer 與 loopback Host。
+- `server.view` 彙總結果依 `console.view`、`settings.view` 和各監控細項權限遮罩日誌、路徑與 metrics；WebSocket 共用同一遮罩資料。
+- 排程保存建立者；建立、修改、立即執行與背景執行均檢查動作所需權限。建立者停用或權限撤銷時，背景工作不執行。
+- 登入失敗依來源 IP／帳號組合節流；5 次帳號失敗或 10 次同 IP 失敗後冷卻 60 秒（視窗 5 分鐘）。JSON API request body 以串流限制 12 MiB。
+- 非管理員 Web／排程啟動預設不得執行伺服器目錄內 `.bat`／`.sh` launcher；管理員與原桌面管理流程保留 Forge 腳本啟動能力。
+
+### 本輪驗證
+
+- `python3 -m compileall -q web_panel tests` 通過。
+- `python3 -m unittest discover -s tests -v`：**147 項通過、1 項 skipped**；新增 8 項隔離安全 regression tests，涵蓋 cookie-only CSRF、same-site sibling Origin、directory 權限、status 欄位遮罩、排程權限撤銷、登入限速、JSON body 上限及 Forge script launcher。
+- Bandit：掃描 4,433 行，**High 0、Medium 0、Low 13**；低風險項包含既有的 subprocess 呼叫與寬泛例外處理，仍需人工判斷。本次未變更相依套件，沒有重跑 pip-audit。
+- 舊環境指定的 `/tmp/mcm_security_smoke_v309.py` 在本 sandbox 不存在；以 `tests/test_security_hardening.py` 的 8 項隔離回歸測試取代執行。
+
+### 尚未解決：不得視為公開多租戶安全邊界
+
+- 即使拒絕非管理員執行 shell launcher，伺服器 JAR、插件與模組仍會以管理面板所在 OS 帳號執行任意 Java 程式碼；尚未導入每伺服器獨立 OS 帳號、Windows Job Object 或容器隔離。**在完成程序／檔案系統隔離前，不應向互不信任的公眾開放免費託管。**
+- 尚未提供每租戶總磁碟／CPU／RAM 配額；單次上傳、暫存與 ZIP 解壓的既有限制不能取代每租戶資源配額。
+- 預設 Web host 為 `127.0.0.1`，面板本身不提供 TLS。若以反向代理或 tunnel 對外，必須正確終止 TLS、保護轉發標頭與存取 ACL；仍未對真實 Windows 主機或外部網路執行滲透測試。
+- 登入節流狀態目前保存在程序記憶體，管理器重啟後會清除；尚未做跨節點或持久化限速。
+
 ## 結論
 
 找到並修補多項授權、CSRF、路徑／連結處理、ZIP 解壓／還原、上傳資源管理、設定檔寫入及伺服器生命週期問題。修補後 **112 項測試通過**；Bandit 掃描 **6,531 行：High 0、Medium 0、Low 21**；pip-audit 回報 **No known vulnerabilities found**。
