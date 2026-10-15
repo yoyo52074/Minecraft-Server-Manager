@@ -41,20 +41,23 @@ class CoreAdapter:
             return ["paper.jar", "server.jar"]
         return ["server.jar", "minecraft_server.jar"]
 
-    def find_launcher(self, directory: Path, configured: str | None = None):
+    def find_launcher(self, directory: Path, configured: str | None = None, allow_scripts=True):
         directory = Path(directory).resolve()
         if self.core_type == "Forge":
-            candidates = [name for name in (configured,) if name in {"run.bat", "run.sh"}]
-            candidates.extend(["run.bat", "run.sh", "forge-server.jar"])
+            candidates = []
+            if allow_scripts:
+                candidates.extend(name for name in (configured,) if name in {"run.bat", "run.sh"})
+                candidates.extend(["run.bat", "run.sh"])
+            candidates.append("forge-server.jar")
             candidates.extend(
                 path.name for path in sorted(directory.glob("forge-*.jar"))
                 if "installer" not in path.name.casefold()
             )
-            if configured:
+            if configured and (allow_scripts or Path(configured).suffix.lower() not in {".bat", ".sh"}):
                 candidates.append(configured)
             candidates.append("server.jar")
         else:
-            candidates = [configured] if configured else []
+            candidates = [configured] if configured and (allow_scripts or Path(configured).suffix.lower() not in {".bat", ".sh"}) else []
             candidates.extend(self.candidate_launchers())
 
         def safe_candidate(name):
@@ -84,11 +87,13 @@ class CoreAdapter:
                 jars = forge_jars
         return safe_candidate(jars[0].name) if jars else None
 
-    def command(self, profile: dict, java_path=None):
+    def command(self, profile: dict, java_path=None, allow_scripts=True):
         directory = Path(profile["directory"])
-        launcher = self.find_launcher(directory, profile.get("launcher"))
+        launcher = self.find_launcher(directory, profile.get("launcher"), allow_scripts=allow_scripts)
         if not launcher:
             raise FileNotFoundError("找不到伺服器啟動檔，請先上傳或安裝核心")
+        if not allow_scripts and launcher.suffix.lower() in {".bat", ".sh"}:
+            raise PermissionError("非管理員不可執行伺服器資料夾中的 shell／批次啟動腳本")
         if launcher.suffix.lower() == ".bat":
             if os.name != "nt":
                 raise ValueError("Windows 批次啟動檔只能在 Windows 上執行")
@@ -549,11 +554,13 @@ class MultiServerManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("eula=true\n", encoding="utf-8")
 
-    def start(self, profile_id, accept_eula=False):
+    def start(self, profile_id, accept_eula=False, allow_scripts=False):
         profile = self.store.get(profile_id)
         if not profile:
             return False, "找不到伺服器"
         if self._is_legacy(profile):
+            if not allow_scripts:
+                return False, "此舊版桌面伺服器尚未隔離啟動環境，只有管理員可以啟動"
             if self.requires_eula(profile_id):
                 if not accept_eula:
                     return False, EULA_REQUIRED_MESSAGE
@@ -578,7 +585,7 @@ class MultiServerManager:
             except WorldLockProbeError as exc:
                 return False, str(exc)
             adapter = CoreAdapter(profile["core_type"])
-            launcher = adapter.find_launcher(Path(profile["directory"]), profile.get("launcher"))
+            launcher = adapter.find_launcher(Path(profile["directory"]), profile.get("launcher"), allow_scripts=allow_scripts)
             if not launcher:
                 return False, "找不到伺服器啟動檔，請先上傳或安裝核心"
             required_java, minecraft_version = adapter.required_java_version(profile, launcher)
@@ -593,7 +600,7 @@ class MultiServerManager:
                     self._record_eula_acceptance(profile)
                 except OSError as exc:
                     return False, f"無法寫入 eula.txt：{exc}"
-            command = adapter.command(profile, java_path)
+            command = adapter.command(profile, java_path, allow_scripts=allow_scripts)
             java_bin = Path(java_path).resolve().parent
             process_env = os.environ.copy()
             if java_bin.is_dir():

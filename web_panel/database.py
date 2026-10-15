@@ -479,6 +479,16 @@ class WebDatabase:
             permissions.add("schedule.view")
         return permissions
 
+    def get_permission_actor(self, user_id: int):
+        if user_id is None:
+            return None
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id AS user_id, role FROM users WHERE id = ? AND enabled = 1",
+                (int(user_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
     def has_server_permission(self, user: dict, server_id: int, permission_key: str) -> bool:
         if user["role"] == "admin":
             return True

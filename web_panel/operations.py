@@ -12,6 +12,16 @@ from urllib.parse import urlparse
 import requests
 
 
+SCHEDULE_ACTION_PERMISSIONS = {
+    "start": {"server.start"},
+    "stop": {"server.stop"},
+    "restart": {"server.restart"},
+    "backup": {"backups.create"},
+    "command_save_all": {"console.send_command"},
+    "stop_when_empty": {"players.view", "server.stop"},
+}
+
+
 def _allowed_webhook_url(url):
     parsed = urlparse(str(url))
     try:
@@ -98,6 +108,10 @@ class Scheduler:
         with self.db._connect() as c:
             c.executescript('''CREATE TABLE IF NOT EXISTS schedules (id INTEGER PRIMARY KEY AUTOINCREMENT,server_id INTEGER NOT NULL,name TEXT NOT NULL,action TEXT NOT NULL,interval_seconds INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,next_run REAL NOT NULL,last_result TEXT NOT NULL DEFAULT '',schedule_type TEXT NOT NULL DEFAULT 'interval',weekdays TEXT NOT NULL DEFAULT '[]',run_time TEXT NOT NULL DEFAULT '',retry_count INTEGER NOT NULL DEFAULT 0,retry_delay_seconds INTEGER NOT NULL DEFAULT 60,ready_timeout_seconds INTEGER NOT NULL DEFAULT 300,notify_webhook TEXT NOT NULL DEFAULT '');CREATE TABLE IF NOT EXISTS schedule_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,schedule_id INTEGER,server_id INTEGER,schedule_name TEXT,action TEXT,started_at REAL,result TEXT,detail TEXT,attempts INTEGER NOT NULL DEFAULT 1);''')
             columns={row[1] for row in c.execute('PRAGMA table_info(schedules)')}
+            if 'created_by' not in columns:
+                c.execute('ALTER TABLE schedules ADD COLUMN created_by INTEGER')
+                admin=c.execute("SELECT id FROM users WHERE role='admin' AND enabled=1 ORDER BY id LIMIT 1").fetchone()
+                if admin:c.execute('UPDATE schedules SET created_by=? WHERE created_by IS NULL',(admin['id'],))
             for name,kind in [('schedule_type',"TEXT NOT NULL DEFAULT 'interval'"),('weekdays',"TEXT NOT NULL DEFAULT '[]'"),('run_time',"TEXT NOT NULL DEFAULT ''"),('retry_count','INTEGER NOT NULL DEFAULT 0'),('retry_delay_seconds','INTEGER NOT NULL DEFAULT 60'),('ready_timeout_seconds','INTEGER NOT NULL DEFAULT 300'),('notify_webhook',"TEXT NOT NULL DEFAULT ''")]:
                 if name not in columns:c.execute(f'ALTER TABLE schedules ADD COLUMN {name} {kind}')
             run_columns={row[1] for row in c.execute('PRAGMA table_info(schedule_runs)')}
@@ -120,12 +134,14 @@ class Scheduler:
             candidate=(base+timedelta(days=offset)).replace(hour=hour,minute=minute,second=0,microsecond=0)
             if candidate.timestamp()>now and candidate.weekday() in days:return candidate.timestamp()
         raise ValueError('找不到下一次排程時間')
-    def list(self,server_id=None):
+    def list(self,server_id=None,include_private=False):
         with self.db._connect() as c:
             q='SELECT * FROM schedules';args=[]
             if server_id is not None:q+=' WHERE server_id=?';args=[server_id]
             records=[dict(row) for row in c.execute(q+' ORDER BY id',args)]
-        for record in records:record['notify_webhook_configured']=bool(record.get('notify_webhook'));record.pop('notify_webhook',None)
+        for record in records:
+            record['notify_webhook_configured']=bool(record.get('notify_webhook'));record.pop('notify_webhook',None)
+            if not include_private:record.pop('created_by',None)
         return records
     def get(self,sid):
         with self.db._connect() as c:
@@ -142,9 +158,10 @@ class Scheduler:
         if not 0<=ready<=3600:raise ValueError('就緒等待時間須介於 0–3600 秒')
         webhook=self._validated_webhook(options.get('notify_webhook',''));now=time.time()
         return {'server_id':server_id,'name':name,'action':action,'interval_seconds':interval,'next_run':self._next_run(now,kind,interval,run_time,days if kind=='weekly' else None),'schedule_type':kind,'weekdays':json.dumps(days),'run_time':run_time,'retry_count':retries,'retry_delay_seconds':delay,'ready_timeout_seconds':ready,'notify_webhook':webhook}
-    def create(self,server_id,name,action,interval_seconds=3600,**options):
+    def create(self,server_id,name,action,interval_seconds=3600,created_by=None,**options):
         item=self._preview(server_id,name,action,interval_seconds,**options)
-        with self.db._connect() as c:c.execute('INSERT INTO schedules(server_id,name,action,interval_seconds,next_run,schedule_type,weekdays,run_time,retry_count,retry_delay_seconds,ready_timeout_seconds,notify_webhook) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(item['server_id'],item['name'],item['action'],item['interval_seconds'],item['next_run'],item['schedule_type'],item['weekdays'],item['run_time'],item['retry_count'],item['retry_delay_seconds'],item['ready_timeout_seconds'],item['notify_webhook']))
+        item['created_by']=int(created_by) if created_by is not None else None
+        with self.db._connect() as c:c.execute('INSERT INTO schedules(server_id,created_by,name,action,interval_seconds,next_run,schedule_type,weekdays,run_time,retry_count,retry_delay_seconds,ready_timeout_seconds,notify_webhook) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(item['server_id'],item['created_by'],item['name'],item['action'],item['interval_seconds'],item['next_run'],item['schedule_type'],item['weekdays'],item['run_time'],item['retry_count'],item['retry_delay_seconds'],item['ready_timeout_seconds'],item['notify_webhook']))
         return self.list(server_id)[-1]
     def update(self,sid,values):
         old=self.get(sid)
@@ -191,6 +208,12 @@ class Scheduler:
         raise TimeoutError(f'等待伺服器完成啟動逾時（{timeout} 秒）')
     def _execute(self,item):
         sid=item['server_id'];action=item['action']
+        required_permissions=SCHEDULE_ACTION_PERMISSIONS.get(action)
+        if required_permissions is None:raise ValueError('不支援的排程動作')
+        actor=self.db.get_permission_actor(item.get('created_by')) if item.get('created_by') is not None else None
+        if actor is None:raise PermissionError('排程建立者已不存在或停用；請由管理員重新建立排程')
+        missing=[permission for permission in required_permissions if not self.db.has_server_permission(actor,sid,permission)]
+        if missing:raise PermissionError('排程建立者已不具備執行此動作的權限：'+', '.join(sorted(missing)))
         if action=='backup':
             manager=self.backup_factory(sid);path=manager.create_backup('scheduled');settings=self.db.backup_retention(sid)
             manager.cleanup_retention(settings['retain_count'],settings['max_age_days'] or None);manager.cleanup_settings_retention(settings['settings_retain_count'],settings['settings_max_age_days']);return f'備份完成：{Path(path).name}'
@@ -207,7 +230,7 @@ class Scheduler:
             if not ok:raise RuntimeError(message)
             return '玩家全數離線，已送出安全停止'
         if action=='start':
-            ok,message=self.multi.start(sid)
+            ok,message=self.multi.start(sid,allow_scripts=actor['role']=='admin')
             if not ok:raise RuntimeError(message)
             self._wait_ready(sid,int(item.get('ready_timeout_seconds',300)));return '伺服器已啟動並就緒'
         if action=='stop':
@@ -222,7 +245,7 @@ class Scheduler:
                 deadline=time.time()+30
                 while time.time()<deadline and self.multi.status(sid).get('running'):self.stop_event.wait(1)
                 if self.multi.status(sid).get('running'):raise TimeoutError('停止伺服器逾時')
-            ok,message=self.multi.start(sid)
+            ok,message=self.multi.start(sid,allow_scripts=actor['role']=='admin')
             if not ok:raise RuntimeError(message)
             self._wait_ready(sid,int(item.get('ready_timeout_seconds',300)));return '伺服器已重啟並就緒'
         raise ValueError('不支援的排程動作')
@@ -250,7 +273,7 @@ class Scheduler:
     def _loop(self):
         while not self.stop_event.wait(self.poll_seconds):
             now=time.time()
-            for item in self.list():
+            for item in self.list(include_private=True):
                 if self.stop_event.is_set():break
                 if not item['enabled'] or item['next_run']>now:continue
                 with self._run_lock:

@@ -4,13 +4,16 @@ import ipaddress
 import io
 import json
 import re
+import threading
+import time
 import zipfile
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from backup_manager import BackupJobManager, BackupManager
@@ -26,11 +29,12 @@ from .multi_server import (
     ServerProfileStore,
 )
 from .permissions import ALL_PERMISSIONS, PERMISSION_GROUPS, PERMISSION_LABELS, ROLE_DEFAULTS
-from .operations import MonitorService, PlayerManager, Scheduler
+from .operations import MonitorService, PlayerManager, Scheduler, SCHEDULE_ACTION_PERMISSIONS
 from .node_resources import NodeResourceService
 from .java_runtime import JavaRuntimeJobs
 
 ROLES = {"admin", "operator", "viewer"}
+MAX_JSON_BODY_BYTES = 12 * 1024 * 1024
 
 
 def create_app(controller, database_path):
@@ -47,7 +51,14 @@ def create_app(controller, database_path):
     legacy_profile = profiles.ensure_legacy(controller.server_directory)
     multi = MultiServerManager(profiles, controller.web_bridge)
     files = SafeFileService(profiles)
-    java_runtime = JavaRuntimeJobs(profiles, db, Path(database_path).resolve().parent / "runtimes", start_server=multi.start)
+
+    def start_server_after_java(profile_id, actor_id):
+        actor = db.get_permission_actor(actor_id)
+        if actor is None:
+            return False, "Java 工作建立者已不存在或停用；請重新登入後啟動伺服器"
+        return multi.start(profile_id, allow_scripts=actor["role"] == "admin")
+
+    java_runtime = JavaRuntimeJobs(profiles, db, Path(database_path).resolve().parent / "runtimes", start_server=start_server_after_java)
     core_updates = CoreUpdateJobs(profiles, multi, java_runtime)
     app.state.db = db
     app.state.bridge = controller.web_bridge
@@ -65,6 +76,27 @@ def create_app(controller, database_path):
     def current_user(request: Request):
         return db.get_session(request.cookies.get("mcm_session"))
 
+    async def read_json_body(request: Request):
+        length = request.headers.get("content-length")
+        if length:
+            try:
+                if int(length) > MAX_JSON_BODY_BYTES:
+                    raise HTTPException(status_code=413, detail="JSON 請求內容超過 12 MiB 上限")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="無效的 Content-Length") from exc
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_JSON_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="JSON 請求內容超過 12 MiB 上限")
+            body.extend(chunk)
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="JSON 請求格式錯誤") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON 請求必須是物件格式")
+        return payload
+
     def require_user(request: Request, roles=None):
         user = current_user(request)
         if not user:
@@ -80,6 +112,60 @@ def create_app(controller, database_path):
         if not db.has_server_permission(user, profile_id, permission):
             raise HTTPException(status_code=403, detail=f"缺少權限：{permission}")
         return user
+
+    login_lock = threading.Lock()
+    login_failures = {}
+    login_blocked_until = {}
+    login_window_seconds = 300
+    login_cooldown_seconds = 60
+
+    def login_keys(request: Request, username: str):
+        peer = request.client.host if request.client else "unknown"
+        account = str(username or "").strip().casefold()[:64]
+        return (("ip", peer), ("account", peer, account))
+
+    def login_retry_after(keys):
+        now = time.monotonic()
+        with login_lock:
+            for key in keys:
+                bucket = login_failures.get(key)
+                if bucket is not None:
+                    while bucket and now - bucket[0] > login_window_seconds:
+                        bucket.popleft()
+                    if not bucket:
+                        login_failures.pop(key, None)
+                remaining = login_blocked_until.get(key, 0) - now
+                if remaining > 0:
+                    return max(1, int(remaining + 0.999))
+                login_blocked_until.pop(key, None)
+        return 0
+
+    def record_login_failure(keys):
+        now = time.monotonic()
+        with login_lock:
+            for key in keys:
+                bucket = login_failures.setdefault(key, deque())
+                while bucket and now - bucket[0] > login_window_seconds:
+                    bucket.popleft()
+                bucket.append(now)
+                limit = 10 if key[0] == "ip" else 5
+                if len(bucket) >= limit:
+                    login_blocked_until[key] = now + login_cooldown_seconds
+            return max((max(1, int(login_blocked_until[key] - now + 0.999)) for key in keys if login_blocked_until.get(key, 0) > now), default=0)
+
+    def clear_login_failures(keys):
+        with login_lock:
+            for key in keys:
+                login_failures.pop(key, None)
+                login_blocked_until.pop(key, None)
+
+    def require_schedule_action_permissions(user, profile_id: int, action: str):
+        required = SCHEDULE_ACTION_PERMISSIONS.get(action)
+        if required is None:
+            return
+        for permission in required:
+            if not db.has_server_permission(user, profile_id, permission):
+                raise HTTPException(status_code=403, detail=f"排程動作缺少權限：{permission}")
 
     def validated_server_port(value):
         if isinstance(value, bool):
@@ -117,6 +203,36 @@ def create_app(controller, database_path):
         for item in multi.statuses():
             if user["role"] != "admin" and not db.has_server_permission(user, item["id"], "server.view"):
                 continue
+            item = dict(item)
+            if user["role"] != "admin":
+                if not db.has_server_permission(user, item["id"], "console.view"):
+                    item.pop("logs", None)
+                if not db.has_server_permission(user, item["id"], "settings.view"):
+                    item.pop("directory", None)
+                if not db.has_server_permission(user, item["id"], "resources.view"):
+                    metrics = item.get("metrics")
+                    if isinstance(metrics, dict):
+                        filtered = {}
+                        for key, value in metrics.items():
+                            normalized = str(key).casefold()
+                            if normalized.startswith("cpu"):
+                                permission = "resources.view_cpu"
+                            elif normalized.startswith(("memory", "heap", "gc")):
+                                permission = "resources.view_memory"
+                            elif normalized.startswith("disk"):
+                                permission = "resources.view_disk"
+                            elif normalized.startswith(("net", "network")):
+                                permission = "resources.view_network"
+                            else:
+                                permission = None
+                            if permission and db.has_server_permission(user, item["id"], permission):
+                                filtered[key] = value
+                        if filtered:
+                            item["metrics"] = filtered
+                        else:
+                            item.pop("metrics", None)
+                    else:
+                        item.pop("metrics", None)
             profile, _ = sync_server_port(profiles.get(item["id"]))
             if profile:
                 item["server_port"] = profile["server_port"]
@@ -128,9 +244,10 @@ def create_app(controller, database_path):
         return templates.TemplateResponse(request=request, name=template, context=context)
 
     def check_csrf(request: Request, user):
-        token = request.headers.get("x-csrf-token") or request.cookies.get("mcm_csrf")
+        token = request.headers.get("x-csrf-token")
         if not token or token != user["csrf_token"]:
             raise HTTPException(status_code=403, detail="CSRF 驗證失敗")
+        require_same_origin(request)
 
     def same_origin(headers, expected_scheme=None, expected_host=None):
         site = headers.get("sec-fetch-site", "").lower()
@@ -157,6 +274,14 @@ def create_app(controller, database_path):
         if not same_origin(request.headers, request.url.scheme, request.url.netloc):
             raise HTTPException(status_code=403, detail="跨來源請求已拒絕")
 
+    @app.middleware("http")
+    async def enforce_state_change_origin(request: Request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not same_origin(
+            request.headers, request.url.scheme, request.url.netloc
+        ):
+            return JSONResponse(status_code=403, content={"detail": "跨來源請求已拒絕"})
+        return await call_next(request)
+
     def current_legacy_profile():
         if not legacy_profile:
             return None
@@ -179,7 +304,7 @@ def create_app(controller, database_path):
         if not user:
             return RedirectResponse("/login", status_code=303)
         node_resources = app.state.node_resources.snapshot(profiles.list()) if user["role"] == "admin" else None
-        return render(request, "dashboard.html", status=app.state.bridge.status(), logs=app.state.bridge.logs(), servers=visible_servers(user), node_resources=node_resources)
+        return render(request, "dashboard.html", servers=visible_servers(user), node_resources=node_resources)
 
     @app.get("/server/{profile_id}", response_class=HTMLResponse)
     def server_page(profile_id: int, request: Request):
@@ -227,7 +352,8 @@ def create_app(controller, database_path):
                 local_peer = local_peer or peer_ip.ipv4_mapped.is_loopback
         except ValueError:
             local_peer = False
-        if not local_peer:
+        local_host = (request.url.hostname or "").strip("[]").casefold()
+        if not local_peer or local_host not in {"localhost", "127.0.0.1", "::1"}:
             raise HTTPException(status_code=403, detail="首次初始化僅允許本機連線，請在執行伺服器的電腦上開啟管理面板")
         require_same_origin(request)
         try:
@@ -245,9 +371,22 @@ def create_app(controller, database_path):
     @app.post("/login")
     def login(request: Request, username: str = Form(...), password: str = Form(...)):
         require_same_origin(request)
+        keys = login_keys(request, username)
+        retry_after = login_retry_after(keys)
+        if retry_after:
+            response = render(request, "login.html", error="登入嘗試過多，請稍後再試")
+            response.status_code = 429
+            response.headers["Retry-After"] = str(retry_after)
+            return response
         user = db.authenticate(username, password)
         if not user:
-            return render(request, "login.html", error="帳號或密碼錯誤")
+            retry_after = record_login_failure(keys)
+            response = render(request, "login.html", error="登入嘗試過多，請稍後再試" if retry_after else "帳號或密碼錯誤")
+            if retry_after:
+                response.status_code = 429
+                response.headers["Retry-After"] = str(retry_after)
+            return response
+        clear_login_failures(keys)
         session_id, csrf = db.create_session(user["id"])
         db.audit(user["id"], "login")
         response = RedirectResponse("/", status_code=303)
@@ -292,7 +431,7 @@ def create_app(controller, database_path):
     async def create_server(request: Request):
         user = require_user(request, {"admin"})
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             requested_port = validated_server_port(payload.get("server_port", 25565))
             profile = profiles.create(
@@ -332,7 +471,7 @@ def create_app(controller, database_path):
         if profile_id in multi._core_updates:
             raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再修改伺服器資料")
         try:
-            values = await request.json()
+            values = await read_json_body(request)
             if not isinstance(values, dict):
                 raise ValueError("伺服器設定格式錯誤")
             if "server_port" in values:
@@ -355,7 +494,7 @@ def create_app(controller, database_path):
     async def delete_server(profile_id: int, request: Request):
         user = require_user(request, {"admin"})
         check_csrf(request, user)
-        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        payload = await read_json_body(request) if request.headers.get("content-type", "").startswith("application/json") else {}
         try:
             with multi._lock:
                 current = multi.status(profile_id)
@@ -413,7 +552,7 @@ def create_app(controller, database_path):
         user = require_server_permission(request, profile_id, "settings.edit")
         check_csrf(request, user)
         try:
-            thresholds = db.set_alert_thresholds(profile_id, await request.json())
+            thresholds = db.set_alert_thresholds(profile_id, await read_json_body(request))
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         db.audit(user["user_id"], "update_alert_thresholds", str(thresholds), server_id=profile_id)
@@ -426,7 +565,7 @@ def create_app(controller, database_path):
 
     @app.put("/api/servers/{profile_id}/alert-notifications")
     async def put_alert_notifications(profile_id:int,request:Request):
-        user=require_server_permission(request,profile_id,"settings.edit");check_csrf(request,user);payload=await request.json()
+        user=require_server_permission(request,profile_id,"settings.edit");check_csrf(request,user);payload=await read_json_body(request)
         try:
             settings=db.set_alert_notification_settings(profile_id,payload.get("webhook_url"),payload.get("cooldown_seconds",900),payload.get("mute_start",""),payload.get("mute_end",""),bool(payload.get("clear_webhook",False)))
         except (ValueError,TypeError) as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
@@ -447,7 +586,7 @@ def create_app(controller, database_path):
     async def server_console(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "console.send_command")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         ok, message = multi.send_command(profile_id, str(payload.get("command", "")))
         db.audit(user["user_id"], "console_command", f"{profile_id}: {payload.get('command', '')}", server_id=profile_id)
         return {"ok": ok, "message": message}
@@ -470,15 +609,21 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=404, detail="找不到伺服器")
         if profile_id in multi._core_updates:
             raise HTTPException(status_code=409, detail="核心更新進行中，請稍後再修改設定")
-        payload = await request.json()
+        payload = await read_json_body(request)
         properties = payload.get("properties", payload)
         profile_values = payload.get("profile", {})
         if not isinstance(profile_values, dict):
             raise HTTPException(status_code=400, detail="伺服器設定格式錯誤")
         profile_values = dict(profile_values)
+        allowed_profile_fields = {"name", "directory", "core_type", "minecraft_version", "java_path", "min_memory", "max_memory", "server_port", "launcher", "auto_restart", "enabled"}
+        unknown_profile_fields = set(profile_values) - allowed_profile_fields
+        if unknown_profile_fields:
+            raise HTTPException(status_code=400, detail="包含不支援的伺服器欄位")
+        if user["role"] != "admin" and set(profile_values).intersection({"name", "directory", "core_type", "enabled"}):
+            raise HTTPException(status_code=403, detail="只有管理員可以修改伺服器身分或根目錄")
         if any(key in profile_values for key in ("java_path", "min_memory", "max_memory")):
             require_server_permission(request, profile_id, "settings.edit_java")
-        if any(key in profile_values for key in ("launcher", "auto_restart")):
+        if any(key in profile_values for key in ("launcher", "auto_restart", "minecraft_version")):
             require_server_permission(request, profile_id, "settings.edit_startup")
         if not isinstance(properties, dict):
             raise HTTPException(status_code=400, detail="設定格式錯誤")
@@ -559,7 +704,7 @@ def create_app(controller, database_path):
     async def start_core_update(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "settings.edit_startup")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             job_id = core_updates.start(profile_id, payload.get("core_type"), payload.get("version"), user["user_id"])
         except ValueError as exc:
@@ -601,7 +746,7 @@ def create_app(controller, database_path):
     @app.post("/api/servers/{profile_id}/players/{action}")
     async def player_action(profile_id: int, action: str, request: Request):
         user = require_server_permission(request, profile_id, "players.view")
-        check_csrf(request, user); payload=await request.json(); player=str(payload.get("player", "")).strip()
+        check_csrf(request, user); payload=await read_json_body(request); player=str(payload.get("player", "")).strip()
         if action in {"kick","ban","pardon","op","deop","whitelist_add","whitelist_remove","ban_ip","pardon_ip"}:
             perm = "players.unban" if action in {"pardon","pardon_ip"} else "players.ban" if action=="ban_ip" else "players.whitelist" if action.startswith("whitelist") else f"players.{action}"
             require_server_permission(request, profile_id, perm)
@@ -626,9 +771,11 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/schedules")
     async def create_schedule(profile_id:int,request:Request):
-        user=require_server_permission(request,profile_id,"schedule.create");check_csrf(request,user);p=await request.json()
+        user=require_server_permission(request,profile_id,"schedule.create");check_csrf(request,user);p=await read_json_body(request)
+        action = str(p.get("action", "backup"))
+        require_schedule_action_permissions(user, profile_id, action)
         try:
-            item=app.state.scheduler.create(profile_id,str(p.get("name","排程")),str(p.get("action","backup")),int(p.get("interval_seconds",3600)),schedule_type=p.get("schedule_type","interval"),weekdays=p.get("weekdays",[]),run_time=p.get("run_time","00:00"),retry_count=p.get("retry_count",0),retry_delay_seconds=p.get("retry_delay_seconds",60),ready_timeout_seconds=p.get("ready_timeout_seconds",300),notify_webhook=p.get("notify_webhook",""))
+            item=app.state.scheduler.create(profile_id,str(p.get("name","排程")),action,int(p.get("interval_seconds",3600)),created_by=user["user_id"],schedule_type=p.get("schedule_type","interval"),weekdays=p.get("weekdays",[]),run_time=p.get("run_time","00:00"),retry_count=p.get("retry_count",0),retry_delay_seconds=p.get("retry_delay_seconds",60),ready_timeout_seconds=p.get("ready_timeout_seconds",300),notify_webhook=p.get("notify_webhook",""))
         except (ValueError,TypeError) as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
         db.audit(user["user_id"],"create_schedule",f"{profile_id}:{item['name']}",server_id=profile_id)
         return {"ok":True,"schedule":item}
@@ -637,17 +784,19 @@ def create_app(controller, database_path):
     async def update_schedule(schedule_id:int,request:Request):
         item=app.state.scheduler.get(schedule_id)
         if not item:raise HTTPException(status_code=404,detail="找不到排程")
-        user=require_server_permission(request,item["server_id"],"schedule.edit");check_csrf(request,user);p=await request.json()
+        user=require_server_permission(request,item["server_id"],"schedule.edit");check_csrf(request,user);p=await read_json_body(request)
+        require_schedule_action_permissions(user, item["server_id"], str(p.get("action", item["action"])))
         try:updated=app.state.scheduler.update(schedule_id,p)
         except (ValueError,TypeError,KeyError) as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
         db.audit(user["user_id"],"update_schedule",f"{schedule_id}:{updated['name']}",server_id=item["server_id"])
-        return {"ok":True,"schedule":{k:v for k,v in updated.items() if k!="notify_webhook"}}
+        return {"ok":True,"schedule":{k:v for k,v in updated.items() if k not in {"notify_webhook", "created_by"}}}
 
     @app.post("/api/schedules/{schedule_id}/run")
     def run_schedule_now(schedule_id:int,request:Request):
         item=app.state.scheduler.get(schedule_id)
         if not item:raise HTTPException(status_code=404,detail="找不到排程")
         user=require_server_permission(request,item["server_id"],"schedule.run");check_csrf(request,user)
+        require_schedule_action_permissions(user, item["server_id"], item["action"])
         result=app.state.scheduler.run_now(schedule_id)
         db.audit(user["user_id"],"run_schedule",f"{schedule_id}:{result['result']}",server_id=item["server_id"])
         return result
@@ -688,7 +837,7 @@ def create_app(controller, database_path):
     async def put_settings_backup_retention(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "backups.create")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             settings = db.set_settings_backup_retention(profile_id, payload.get("retain_count", 50), payload.get("max_age_days", 180))
         except (ValueError, TypeError) as exc:
@@ -709,7 +858,7 @@ def create_app(controller, database_path):
     async def put_backup_retention(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "backups.create")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             result = db.set_backup_retention(profile_id, payload.get("retain_count", 10), payload.get("max_age_days", 0))
         except (ValueError, TypeError) as exc:
@@ -729,8 +878,9 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/backups/verify")
     async def verify_backup(profile_id: int, request: Request):
-        require_server_permission(request, profile_id, "backups.view")
-        payload = await request.json()
+        user = require_server_permission(request, profile_id, "backups.view")
+        check_csrf(request, user)
+        payload = await read_json_body(request)
         profile = profiles.get(profile_id)
         root = (Path(profile["directory"]) / "backups").resolve()
         target = (root / str(payload.get("name", ""))).resolve()
@@ -772,7 +922,7 @@ def create_app(controller, database_path):
         status = multi.status(profile_id)
         if status and status["running"]:
             raise HTTPException(status_code=409, detail="建立備份前建議先停止伺服器")
-        payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        payload = await read_json_body(request) if request.headers.get("content-type", "").startswith("application/json") else {}
         settings = db.backup_retention(profile_id)
         try:
             task_id = app.state.backup_jobs.start(profile_id, profile["directory"], str(payload.get("label", "manual")), settings["retain_count"], settings["max_age_days"], str(payload.get("scope", "all")))
@@ -814,7 +964,7 @@ def create_app(controller, database_path):
         status = multi.status(profile_id)
         if status and status["running"]:
             raise HTTPException(status_code=409, detail="還原備份前必須先停止伺服器")
-        payload = await request.json()
+        payload = await read_json_body(request)
         backup = Path(profile["directory"]) / "backups" / str(payload.get("name", ""))
         root = (Path(profile["directory"]) / "backups").resolve()
         if backup.resolve().parent != root or backup.suffix.lower() != ".zip":
@@ -910,7 +1060,7 @@ def create_app(controller, database_path):
     async def make_directory(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "files.create_folder")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             files.mkdir(profile_id, payload.get("path", ""))
         except (PermissionError, FileExistsError, OSError) as exc:
@@ -921,7 +1071,7 @@ def create_app(controller, database_path):
     async def rename_file(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "files.rename")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             target = files.rename(profile_id, payload.get("path", ""), payload.get("new_name", ""))
         except (PermissionError, ValueError, OSError) as exc:
@@ -940,7 +1090,7 @@ def create_app(controller, database_path):
     async def write_text_file(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "files.edit")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         path_value = str(payload.get("path", ""))
         normalized_parts = [part for part in path_value.replace("\\", "/").split("/") if part not in {"", "."}]
         is_root_properties = len(normalized_parts) == 1 and normalized_parts[0] == "server.properties"
@@ -974,7 +1124,7 @@ def create_app(controller, database_path):
 
     @app.post("/api/servers/{profile_id}/files/versions/restore")
     async def restore_file_version(profile_id:int,request:Request):
-        user=require_server_permission(request,profile_id,"files.edit");check_csrf(request,user);payload=await request.json()
+        user=require_server_permission(request,profile_id,"files.edit");check_csrf(request,user);payload=await read_json_body(request)
         try:result=files.restore_version(profile_id,payload.get("path",""),payload.get("version_id",""))
         except (PermissionError,FileNotFoundError,ValueError,OSError) as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
         db.audit(user["user_id"],"restore_file_version",f"{profile_id}:{result['path']}:{result['restored_version']}",server_id=profile_id)
@@ -987,7 +1137,7 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=404, detail="未知的檔案操作")
         user = require_server_permission(request, profile_id, permission)
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             if operation in {"copy", "move"}:
                 target = files.copy_or_move(profile_id, payload.get("source", ""), payload.get("destination", ""), operation == "move", payload.get("conflict", "error"))
@@ -1009,7 +1159,7 @@ def create_app(controller, database_path):
             raise HTTPException(status_code=404, detail="未知的批次檔案操作")
         user = require_server_permission(request, profile_id, permission)
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             if operation == "delete":
                 result = {"count": files.delete_many(profile_id, payload.get("paths", []))}
@@ -1025,7 +1175,7 @@ def create_app(controller, database_path):
     async def delete_file(profile_id: int, request: Request):
         user = require_server_permission(request, profile_id, "files.delete")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         try:
             files.delete(profile_id, payload.get("path", ""))
         except (PermissionError, FileNotFoundError, OSError) as exc:
@@ -1049,7 +1199,7 @@ def create_app(controller, database_path):
     async def legacy_console(request: Request):
         user = require_server_permission(request, legacy_profile["id"], "console.send_command")
         check_csrf(request, user)
-        payload = await request.json()
+        payload = await read_json_body(request)
         ok, message = app.state.bridge.send_command(str(payload.get("command", "")))
         db.audit(user["user_id"], "console_command", str(payload.get("command", "")))
         return {"ok": ok, "message": message}
@@ -1164,14 +1314,14 @@ def create_app(controller, database_path):
             "application/json"
         ):
             try:
-                payload = await request.json()
+                payload = await read_json_body(request)
             except (ValueError, TypeError):
                 payload = {}
         if not isinstance(payload, dict):
             payload = {}
         accept_eula = payload.get("accept_eula") is True
         actions = {
-            "start": lambda value: multi.start(value, accept_eula=accept_eula),
+            "start": lambda value: multi.start(value, accept_eula=accept_eula, allow_scripts=user["role"] == "admin"),
             "stop": multi.stop,
             "force-stop": lambda value: multi.stop(value, True),
         }

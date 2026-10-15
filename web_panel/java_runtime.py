@@ -206,7 +206,7 @@ class JavaRuntimeJobs:
         message = f"已找到並套用相容 Java {major}：{path}"
         start_result = None
         if start_after and self.start_server:
-            ok, start_message = self.start_server(profile["id"])
+            ok, start_message = self.start_server(profile["id"], actor_id)
             start_result = {"ok": bool(ok), "message": str(start_message)}
             message += f"；{'已重試啟動' if ok else 'Java 已修復，但啟動仍未成功'}：{start_message}"
         self._update(job_id, status="completed", stage="complete", java_path=str(path),

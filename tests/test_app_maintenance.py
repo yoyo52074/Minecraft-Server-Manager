@@ -57,7 +57,7 @@ class MaintenanceApiTests(unittest.TestCase):
         session_id, self.csrf = self.app.state.db.create_session(user_id)
         self.session_id = session_id
         self.profile_id = self.app.state.profiles.list()[0]["id"]
-        self.client = TestClient(self.app)
+        self.client = TestClient(self.app, headers={"origin": "http://testserver"})
         self.client.cookies.set("mcm_session", session_id)
         self.client.cookies.set("mcm_csrf", self.csrf)
 
@@ -445,7 +445,7 @@ class MaintenanceApiTests(unittest.TestCase):
         self.assertEqual(job["status"],"completed",job)
         self.assertTrue(job["start_after"])
         self.assertTrue(job["start_result"]["ok"])
-        retry_start.assert_called_once_with(self.profile_id)
+        retry_start.assert_called_once_with(self.profile_id, self.user_id)
         self.assertEqual(self.app.state.profiles.get(self.profile_id)["java_path"],java_path)
 
     def test_start_with_newer_java_auto_downloads_legacy_java_and_retries(self):
@@ -650,15 +650,15 @@ class MaintenanceApiTests(unittest.TestCase):
     def test_first_admin_setup_rejects_cross_site_request(self):
         empty_dir=Path(self.temp.name)/"empty-server"
         empty_app=create_app(FakeController(str(empty_dir)),str(Path(self.temp.name)/"empty-panel.db"))
-        remote=TestClient(empty_app,client=("203.0.113.7",51000))
-        local=TestClient(empty_app,client=("127.0.0.1",51001))
+        remote=TestClient(empty_app,client=("203.0.113.7",51000),headers={"origin":"http://127.0.0.1"},base_url="http://127.0.0.1")
+        local=TestClient(empty_app,client=("127.0.0.1",51001),headers={"origin":"http://127.0.0.1"},base_url="http://127.0.0.1")
         try:
-            denied_remote=remote.post("/setup",data={"username":"attacker","password":"Attacker-password-123"},headers={"origin":"http://testserver","sec-fetch-site":"same-origin"})
+            denied_remote=remote.post("/setup",data={"username":"attacker","password":"Attacker-password-123"},headers={"origin":"http://127.0.0.1","sec-fetch-site":"same-origin"})
             self.assertEqual(denied_remote.status_code,403)
             denied_cross=local.post("/setup",data={"username":"attacker","password":"Attacker-password-123"},headers={"origin":"https://attacker.example","sec-fetch-site":"cross-site"})
             self.assertEqual(denied_cross.status_code,403)
             self.assertEqual(empty_app.state.db.user_count(),0)
-            allowed=local.post("/setup",data={"username":"first-admin","password":"Secure-password-123"},headers={"origin":"http://testserver","sec-fetch-site":"same-origin"},follow_redirects=False)
+            allowed=local.post("/setup",data={"username":"first-admin","password":"Secure-password-123"},headers={"origin":"http://127.0.0.1","sec-fetch-site":"same-origin"},follow_redirects=False)
             self.assertEqual(allowed.status_code,303,allowed.text)
             self.assertEqual(empty_app.state.db.user_count(),1)
             with self.assertRaisesRegex(ValueError,"已初始化"):
