@@ -21,11 +21,19 @@ class ConsoleScrollTemplateTests(unittest.TestCase):
         self.assertIn("let consoleFollow=true;", self.source)
         self.assertIn("function isConsoleNearBottom(box)", self.source)
         self.assertIn(
-            "addEventListener('scroll',event=>{consoleFollow=isConsoleNearBottom(event.currentTarget)})",
+            "addEventListener('scroll',event=>{consoleFollow=isConsoleNearBottom(event.currentTarget);updateConsoleJumpButton()})",
             self.source,
         )
         self.assertIn("if(consoleFollow)box.scrollTop=box.scrollHeight;", self.source)
         self.assertIn("Math.min(previousTop,Math.max(0,box.scrollHeight-box.clientHeight))", self.source)
+
+    def test_jump_to_latest_button_is_positioned_in_console_and_restores_follow(self):
+        self.assertIn('id="console-latest"', self.source)
+        self.assertIn('onclick="scrollConsole()"', self.source)
+        self.assertIn("button.style.display=consoleFollow?'none':'block'", self.source)
+        self.assertIn("consoleFollow=true;box.scrollTop=box.scrollHeight;updateConsoleJumpButton()", self.source)
+        self.assertIn("right:16px;bottom:16px", self.source)
+        self.assertIn(">跳到最新</button>", self.source)
 
 
 if __name__ == "__main__":
