@@ -69,20 +69,24 @@ class PlayerManager:
         for item in history:known[item['name'].casefold()]={**known.get(item['name'].casefold(),{}),**item,'source':'history'}
         return {'online':online,'known':list(known.values()),'whitelist':whitelist,'ops':ops,'banned_players':banned,'banned_ips':banned_ips}
     def list(self,profile_id):
-        logs=self.multi.logs(profile_id,500);names=[];found=False
+        logs=self.multi.logs(profile_id,500);online={}
+        if self.db:
+            previous=self.db.player_history(profile_id,limit=500)['players'];online={item['name'].casefold():item['name'] for item in previous if item['is_online']}
+        found=False
         for line in logs:
             match=re.search(r'(?:There are\s+\d+.*?online:\s*|\d+\s+players?\s+online:\s*)(.*)$',line,re.I)
-            if match:names=[name.strip() for name in match.group(1).split(',') if name.strip() and name.strip().lower() not in {'none','no one'}];found=True
-        if self.db and not found:
-            previous=self.db.player_history(profile_id,limit=500)['players'];online={item['name'].casefold():item['name'] for item in previous if item['is_online']};saw_event=False
-            for line in logs:
-                joined=re.search(r'\]:\s*([A-Za-z0-9_]{1,16}) joined the game',line,re.I);left=re.search(r'\]:\s*([A-Za-z0-9_]{1,16}) left the game',line,re.I)
-                if joined:online[joined.group(1).casefold()]=joined.group(1);saw_event=True
-                if left:online.pop(left.group(1).casefold(),None);saw_event=True
-            if saw_event:names=list(online.values());found=True
+            if match:
+                names=[name.strip() for name in match.group(1).split(',') if name.strip() and name.strip().lower() not in {'none','no one'}]
+                online={name.casefold():name for name in names};found=True
+                continue
+            joined=re.search(r'\]:\s*(?:\[[^\]]+\]\s*:?\s*)?([A-Za-z0-9_]{1,16}) joined the game',line,re.I)
+            left=re.search(r'\]:\s*(?:\[[^\]]+\]\s*:?\s*)?([A-Za-z0-9_]{1,16}) left the game',line,re.I)
+            if joined:online[joined.group(1).casefold()]=joined.group(1);found=True
+            elif left:online.pop(left.group(1).casefold(),None);found=True
+        if not found:online={}
         self.last_snapshot_reliable[profile_id]=found;directory=self._profile_directory(profile_id)
         cache={str(item.get('name','')).casefold():item.get('uuid','') for item in self._json_file(directory/'usercache.json') if isinstance(item,dict)}
-        players=[{'name':name,'uuid':cache.get(name.casefold(),'')} for name in names]
+        players=[{'name':name,'uuid':cache.get(name.casefold(),'')} for name in online.values()]
         if self.db and found:self.db.record_player_snapshot(profile_id,players)
         return players
     def command(self,profile_id,action,player):

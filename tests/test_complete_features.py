@@ -61,6 +61,23 @@ class CompleteFeatureTests(unittest.TestCase):
         self.assertEqual([e['action'] for e in self.db.player_events(4)],['leave','join'])
         self.assertEqual(self.db.player_sessions(4)[0]['left_at'],160)
 
+    def test_player_list_replays_join_leave_after_latest_snapshot(self):
+        multi=Mock();multi.store.get.return_value={'directory':self.root}
+        multi.logs.return_value=[
+            '[00:00:00] [Server thread/INFO]: There are 0/20 players online:',
+            '[00:00:10] [Server thread/INFO]: Steve joined the game',
+            '[00:00:11] [Server thread/INFO]: Alex joined the game',
+        ]
+        manager=PlayerManager(multi,self.db)
+        self.assertCountEqual([item['name'] for item in manager.list(4)],['Steve','Alex'])
+        self.assertTrue(manager.last_snapshot_reliable[4])
+        self.assertEqual(sum(bool(item['is_online']) for item in self.db.player_history(4)['players']),2)
+        multi.logs.return_value=[
+            '[00:00:20] [Server thread/INFO]: There are 2/20 players online: Steve, Alex',
+            '[00:00:21] [Server thread/INFO]: Steve left the game',
+        ]
+        self.assertEqual([item['name'] for item in manager.list(4)],['Alex'])
+
     def test_schedule_frequency_validation_and_webhook_masking(self):
         multi=Mock()
         multi.status.return_value={'running':False,'phase':'stopped','logs':[]}
