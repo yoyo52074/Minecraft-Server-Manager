@@ -25,6 +25,8 @@ MAX_FILE_VERSION_BYTES = 1024 * 1024 * 1024
 MAX_FILE_VERSIONS = 50
 MAX_TOTAL_VERSION_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TOTAL_VERSION_COUNT = 1000
+WINDOWS_INPLACE_TEXT_EXTENSIONS = {".conf", ".ini", ".json", ".md", ".properties", ".toml", ".txt", ".cfg", ".yaml", ".yml"}
+MAX_WINDOWS_INPLACE_EDIT_BYTES = 4 * 1024 * 1024
 INTERNAL_DIRECTORIES = {".mcm_versions", ".mcm_uploads"}
 WINDOWS_DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
@@ -64,6 +66,50 @@ def _open_regular_file(path):
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ValueError("只允許讀取一般檔案")
         return os.fdopen(descriptor, "rb")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _is_windows():
+    return os.name == "nt"
+
+
+def _open_regular_file_for_update(path):
+    """Open a regular Windows file without following reparse points."""
+    if not _is_windows():
+        raise OSError("僅 Windows 支援此檔案更新模式")
+    if _is_link_or_reparse(path):
+        raise PermissionError("不允許更新符號連結或 Windows reparse point")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    # Share read/write so a running server can continue using a configuration file;
+    # omit share-delete and open the reparse point itself, never its target.
+    handle = create_file(str(path), 0x80000000 | 0x40000000, 0x1 | 0x2,
+                         None, 3, 0x80 | 0x00200000, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    raw_handle = handle if isinstance(handle, int) else ctypes.cast(handle, ctypes.c_void_p).value
+    try:
+        descriptor = msvcrt.open_osfhandle(raw_handle, os.O_RDWR | os.O_BINARY)
+    except Exception:
+        kernel32.CloseHandle(handle)
+        raise
+    try:
+        info = os.fstat(descriptor)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if not stat.S_ISREG(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & reparse_flag):
+            raise PermissionError("只允許原地更新一般檔案")
+        return os.fdopen(descriptor, "r+b")
     except Exception:
         os.close(descriptor)
         raise
@@ -232,12 +278,12 @@ class SafeFileService:
         with _open_regular_file(archive) as stream:
             for chunk in iter(lambda:stream.read(1024*1024),b""):digest.update(chunk)
         if digest.hexdigest()!=meta.get("sha256"):raise ValueError("版本快照完整性驗證失敗")
-        if target.is_file():self.snapshot(profile_id,relative)
+        snapshot_meta=self.snapshot(profile_id,relative) if target.is_file() else None
         target.parent.mkdir(parents=True,exist_ok=True)
         descriptor,temp_name=tempfile.mkstemp(prefix=f".{target.name}.",suffix=".restoring",dir=target.parent);temp=Path(temp_name)
         try:
             with os.fdopen(descriptor,"wb") as output,_open_regular_file(archive) as source:shutil.copyfileobj(source,output,length=1024*1024)
-            os.replace(temp,target)
+            self._replace_text_file(profile_id,relative,target,temp,snapshot_meta)
         finally:temp.unlink(missing_ok=True)
         return {"path":str(relative),"restored_version":version_id,"created_at":meta.get("created_at")}
 
@@ -333,7 +379,8 @@ class SafeFileService:
             raise ValueError("不允許上傳可執行檔")
         target.parent.mkdir(parents=True, exist_ok=True)
         target = self._conflict_target(target, conflict)
-        if target.exists():self.snapshot(profile_id,target.relative_to(self.profile_root(profile_id)).as_posix())
+        relative_target=target.relative_to(self.profile_root(profile_id)).as_posix()
+        snapshot_meta=self.snapshot(profile_id,relative_target) if target.exists() else None
         total = 0
         descriptor, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".uploading", dir=target.parent)
         temp = Path(temp_name)
@@ -347,7 +394,7 @@ class SafeFileService:
                     if total > max_bytes:
                         raise ValueError("檔案超過 512 MB 上傳限制")
                     output.write(chunk)
-            os.replace(temp, target)
+            self._replace_text_file(profile_id,relative_target,target,temp,snapshot_meta)
         finally:
             if temp.exists():
                 temp.unlink()
@@ -422,9 +469,9 @@ class SafeFileService:
             if final:
                 final_target = self._conflict_target(target, conflict)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if final_target.exists():
-                    self.snapshot(profile_id, final_target.relative_to(root).as_posix())
-                os.replace(part, final_target)
+                relative_target=final_target.relative_to(root).as_posix()
+                snapshot_meta=self.snapshot(profile_id,relative_target) if final_target.exists() else None
+                self._replace_text_file(profile_id,relative_target,final_target,part,snapshot_meta)
                 meta.unlink(missing_ok=True)
                 return {"complete": True, "received": received, "path": final_target.relative_to(root).as_posix()}
             return {"complete": False, "received": received}
@@ -510,6 +557,56 @@ class SafeFileService:
             raise ValueError("檔案不存在或超過 4 MB 編輯限制")
         return target.read_text(encoding="utf-8")
 
+    def _replace_text_file(self, profile_id, relative, target, temp, snapshot_meta):
+        try:
+            os.replace(temp, target)
+            return
+        except PermissionError as exc:
+            if not _is_windows():
+                raise
+            replace_error = exc
+        if target.suffix.casefold() not in WINDOWS_INPLACE_TEXT_EXTENSIONS or not snapshot_meta:
+            raise PermissionError("Windows 無法替換正在使用中的檔案；為避免損壞資料，請停止伺服器後再修改。") from replace_error
+        if snapshot_meta.get("size", MAX_WINDOWS_INPLACE_EDIT_BYTES + 1) > MAX_WINDOWS_INPLACE_EDIT_BYTES:
+            raise PermissionError("檔案超過安全原地修改限制；請停止伺服器後再修改。原始版本快照已保留。") from replace_error
+        try:
+            new_size = temp.stat().st_size
+            if new_size > MAX_WINDOWS_INPLACE_EDIT_BYTES:
+                raise ValueError("檔案超過安全原地修改限制")
+            archive = self._version_folder(profile_id, relative) / f"{snapshot_meta['version_id']}.bin"
+            with _open_regular_file(archive) as source:
+                original = source.read(MAX_WINDOWS_INPLACE_EDIT_BYTES + 1)
+            new_content = temp.read_bytes()
+            if len(original) != snapshot_meta["size"] or len(original) > MAX_WINDOWS_INPLACE_EDIT_BYTES:
+                raise ValueError("修改前版本快照大小不符")
+        except (OSError, KeyError, ValueError) as exc:
+            raise PermissionError("無法讀取修改前版本快照；為保護原檔，請停止伺服器後再試。") from exc
+        try:
+            output = _open_regular_file_for_update(target)
+        except OSError as exc:
+            raise PermissionError("檔案正被伺服器或其他程式占用，無法安全修改；原始版本快照已保留，請停止伺服器後再試。") from exc
+        with output:
+            if output.read(MAX_WINDOWS_INPLACE_EDIT_BYTES + 1) != original:
+                raise PermissionError("檔案在修改期間已被更新；為保護最新內容，請重新載入後再保存。")
+            try:
+                output.seek(0)
+                if output.write(new_content) != len(new_content):
+                    raise OSError("未能完整寫入新內容")
+                output.truncate()
+                output.flush()
+                os.fsync(output.fileno())
+            except OSError as write_error:
+                try:
+                    output.seek(0)
+                    if output.write(original) != len(original):
+                        raise OSError("未能完整還原原始內容")
+                    output.truncate()
+                    output.flush()
+                    os.fsync(output.fileno())
+                except OSError as restore_error:
+                    raise OSError("原地修改失敗且自動還原未完成；原始版本快照仍保留，請停止伺服器並使用版本紀錄復原。") from restore_error
+                raise PermissionError("檔案無法安全原地修改，原內容已復原；請停止伺服器後再試。") from write_error
+
     def write_text(self, profile_id, relative, content, conflict="overwrite"):
         target = self.resolve(profile_id, relative)
         if target.suffix.lower() in BLOCKED_EXTENSIONS or len(content.encode("utf-8")) > 4 * 1024 * 1024:
@@ -517,7 +614,12 @@ class SafeFileService:
         if conflict != "overwrite":
             target = self._conflict_target(target, conflict)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():self.snapshot(profile_id,relative)
+        snapshot_meta=None
+        if target.exists():
+            try:snapshot_meta=self.snapshot(profile_id,relative)
+            except PermissionError as exc:
+                if _is_windows():raise PermissionError("無法建立修改前版本快照；檔案可能正被伺服器或其他程式占用，請停止伺服器後再試。") from exc
+                raise
         if target.is_dir():
             raise IsADirectoryError("不能以文字檔覆寫資料夾")
         descriptor, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".editing", dir=target.parent)
@@ -527,7 +629,7 @@ class SafeFileService:
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temp, target)
+            self._replace_text_file(profile_id, relative, target, temp, snapshot_meta)
         finally:
             temp.unlink(missing_ok=True)
         return target

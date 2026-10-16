@@ -618,6 +618,81 @@ time.sleep(30)
         with self.assertRaises(PermissionError):service.resolve(profile["id"],".mcm_versions")
         self.assertNotIn(".mcm_versions",[entry["name"] for entry in service.list(profile["id"])])
 
+    def test_windows_locked_config_uses_snapshot_guarded_in_place_fallback(self):
+        profile=self.store.create("Windows edit",Path(self.temp.name)/"windows-edit","Paper")
+        service=SafeFileService(self.store);root=Path(profile["directory"]);target=root/"server.properties"
+        target.write_text("server-port=25565\n",encoding="utf-8")
+        real_replace=os.replace
+        def deny_target_replace(source,destination):
+            if Path(destination)==target:raise PermissionError("simulated Windows sharing violation")
+            return real_replace(source,destination)
+        with patch("web_panel.file_service._is_windows",return_value=True), \
+             patch("web_panel.file_service._open_regular_file_for_update",side_effect=lambda path:path.open("r+b")), \
+             patch("web_panel.file_service.os.replace",side_effect=deny_target_replace):
+            service.write_text(profile["id"],"server.properties","server-port=25566\n")
+        self.assertEqual(target.read_text(encoding="utf-8"),"server-port=25566\n")
+        versions=service.versions(profile["id"],"server.properties")["versions"]
+        self.assertEqual(len(versions),1)
+        archive=service._version_folder(profile["id"],"server.properties")/f"{versions[0]['version_id']}.bin"
+        self.assertEqual(archive.read_text(encoding="utf-8"),"server-port=25565\n")
+
+    def test_windows_chunk_upload_overwrite_uses_safe_text_fallback(self):
+        profile=self.store.create("Windows upload",Path(self.temp.name)/"windows-upload","Paper")
+        service=SafeFileService(self.store);root=Path(profile["directory"]);target=root/"server.properties"
+        target.write_text("server-port=25565\n",encoding="utf-8")
+        upload_id=uuid.uuid4().hex;real_replace=os.replace
+        def deny_target_replace(source,destination):
+            if Path(destination)==target:raise PermissionError("simulated Windows sharing violation")
+            return real_replace(source,destination)
+        with patch("web_panel.file_service._is_windows",return_value=True), \
+             patch("web_panel.file_service._open_regular_file_for_update",side_effect=lambda path:path.open("r+b")), \
+             patch("web_panel.file_service.os.replace",side_effect=deny_target_replace):
+            result=service.upload_chunk(profile["id"],upload_id,"server.properties",0,
+                                        b"server-port=25566\n",True,"overwrite")
+        self.assertTrue(result["complete"])
+        self.assertEqual(target.read_text(encoding="utf-8"),"server-port=25566\n")
+
+    def test_windows_fallback_refuses_log_files(self):
+        profile=self.store.create("Windows log",Path(self.temp.name)/"windows-log","Paper")
+        service=SafeFileService(self.store);root=Path(profile["directory"]);target=root/"latest.log"
+        target.write_text("old log\n",encoding="utf-8")
+        real_replace=os.replace
+        def deny_target_replace(source,destination):
+            if Path(destination)==target:raise PermissionError("simulated Windows sharing violation")
+            return real_replace(source,destination)
+        with patch("web_panel.file_service._is_windows",return_value=True), \
+             patch("web_panel.file_service._open_regular_file_for_update",side_effect=AssertionError("unsafe fallback")), \
+             patch("web_panel.file_service.os.replace",side_effect=deny_target_replace):
+            with self.assertRaisesRegex(PermissionError,"停止伺服器"):
+                service.write_text(profile["id"],"latest.log","new log\n")
+        self.assertEqual(target.read_text(encoding="utf-8"),"old log\n")
+
+    @unittest.skipUnless(os.name=="nt","Windows-only file sharing test")
+    def test_windows_open_handle_without_delete_share_uses_safe_fallback(self):
+        import ctypes
+        from ctypes import wintypes
+        import web_panel.file_service as file_service_module
+        profile=self.store.create("Windows native lock",Path(self.temp.name)/"windows-native-lock","Paper")
+        service=SafeFileService(self.store);target=Path(profile["directory"])/"server.properties"
+        target.write_text("server-port=25565\n",encoding="utf-8")
+        kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
+        create_file=kernel32.CreateFileW
+        create_file.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,
+                              wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+        create_file.restype=wintypes.HANDLE
+        kernel32.CloseHandle.argtypes=[wintypes.HANDLE];kernel32.CloseHandle.restype=wintypes.BOOL
+        handle=create_file(str(target),0x80000000|0x40000000,0x1|0x2,None,3,0x80,None)
+        if handle is None or handle==ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            with patch("web_panel.file_service._open_regular_file_for_update",
+                       wraps=file_service_module._open_regular_file_for_update) as update_open:
+                service.write_text(profile["id"],"server.properties","server-port=25566\n")
+                update_open.assert_called_once()
+        finally:
+            kernel32.CloseHandle(handle)
+        self.assertEqual(target.read_text(encoding="utf-8"),"server-port=25566\n")
+
     def test_chunk_upload_resume_and_cancel(self):
         profile = self.store.create("Upload", Path(self.temp.name) / "upload", "Paper")
         service = SafeFileService(self.store)
