@@ -25,7 +25,7 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt pyinstaller
 
       - name: Run Windows file-lock regression test
-        run: python -m unittest tests.test_web_panel_services.WebPanelServiceTests.test_windows_open_handle_without_delete_share_uses_safe_fallback -v
+        run: python -m unittest tests.test_web_panel_services.WindowsFileLockTests.test_windows_open_handle_without_delete_share_uses_safe_fallback -v
 
       - name: Build EXE
         shell: pwsh

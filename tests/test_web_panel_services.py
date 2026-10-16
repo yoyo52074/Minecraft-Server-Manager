@@ -667,32 +667,6 @@ time.sleep(30)
                 service.write_text(profile["id"],"latest.log","new log\n")
         self.assertEqual(target.read_text(encoding="utf-8"),"old log\n")
 
-    @unittest.skipUnless(os.name=="nt","Windows-only file sharing test")
-    def test_windows_open_handle_without_delete_share_uses_safe_fallback(self):
-        import ctypes
-        from ctypes import wintypes
-        import web_panel.file_service as file_service_module
-        profile=self.store.create("Windows native lock",Path(self.temp.name)/"windows-native-lock","Paper")
-        service=SafeFileService(self.store);target=Path(profile["directory"])/"server.properties"
-        target.write_text("server-port=25565\n",encoding="utf-8")
-        kernel32=ctypes.WinDLL("kernel32",use_last_error=True)
-        create_file=kernel32.CreateFileW
-        create_file.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,
-                              wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
-        create_file.restype=wintypes.HANDLE
-        kernel32.CloseHandle.argtypes=[wintypes.HANDLE];kernel32.CloseHandle.restype=wintypes.BOOL
-        handle=create_file(str(target),0x80000000|0x40000000,0x1|0x2,None,3,0x80,None)
-        if handle is None or handle==ctypes.c_void_p(-1).value:
-            raise ctypes.WinError(ctypes.get_last_error())
-        try:
-            with patch("web_panel.file_service._open_regular_file_for_update",
-                       wraps=file_service_module._open_regular_file_for_update) as update_open:
-                service.write_text(profile["id"],"server.properties","server-port=25566\n")
-                update_open.assert_called_once()
-        finally:
-            kernel32.CloseHandle(handle)
-        self.assertEqual(target.read_text(encoding="utf-8"),"server-port=25566\n")
-
     def test_chunk_upload_resume_and_cancel(self):
         profile = self.store.create("Upload", Path(self.temp.name) / "upload", "Paper")
         service = SafeFileService(self.store)
@@ -813,6 +787,44 @@ time.sleep(30)
         self.db.set_server_permissions(user_id, profile["id"], {"server.view", "files.view"})
         self.assertTrue(self.db.has_server_permission(user, profile["id"], "server.view"))
         self.assertFalse(self.db.has_server_permission(user, profile["id"], "server.stop"))
+
+
+class WindowsFileLockTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows-only file sharing test")
+    def test_windows_open_handle_without_delete_share_uses_safe_fallback(self):
+        import ctypes
+        from ctypes import wintypes
+        import web_panel.file_service as file_service_module
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            target = root / "server.properties"
+            target.write_text("server-port=25565\n", encoding="utf-8")
+
+            class ProfileStore:
+                def get(self, profile_id):
+                    return {"id": 1, "directory": str(root)} if int(profile_id) == 1 else None
+
+            service = SafeFileService(ProfileStore())
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            create_file.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = create_file(str(target), 0x80000000 | 0x40000000, 0x1 | 0x2,
+                                 None, 3, 0x80, None)
+            if handle is None or handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                with patch("web_panel.file_service._open_regular_file_for_update",
+                           wraps=file_service_module._open_regular_file_for_update) as update_open:
+                    service.write_text(1, "server.properties", "server-port=25566\n")
+                    update_open.assert_called_once()
+            finally:
+                kernel32.CloseHandle(handle)
+            self.assertEqual(target.read_text(encoding="utf-8"), "server-port=25566\n")
 
 
 if __name__ == "__main__":
