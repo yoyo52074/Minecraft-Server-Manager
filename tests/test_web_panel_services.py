@@ -27,6 +27,15 @@ class WebPanelServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_multi_server_log_cursor_returns_only_new_lines(self):
+        profile=self.store.create("Log cursor",Path(self.temp.name)/"log-cursor","Paper")
+        manager=MultiServerManager(self.store)
+        manager._append_log(profile["id"],"old line")
+        cursor=manager.log_cursor(profile["id"])
+        manager._append_log(profile["id"],"fresh list response")
+        self.assertEqual(manager.logs_since(profile["id"],cursor),["fresh list response"])
+        self.assertEqual(manager.logs(profile["id"],10),["old line","fresh list response"])
+
     def test_fabric_profile_and_launcher_detection(self):
         directory = Path(self.temp.name) / "fabric"
         profile = self.store.create("Fabric", directory, "Fabric", minecraft_version="1.21.1")

@@ -368,6 +368,7 @@ class MultiServerManager:
         self._lock = threading.RLock()
         self._processes = {}
         self._logs = {}
+        self._log_sequences = {}
         self._started_at = {}
         self._phases = {}
         self._phase_at = {}
@@ -528,9 +529,35 @@ class MultiServerManager:
         return [self.status(item["id"]) for item in self.store.list()]
 
     def logs(self, profile_id, limit=200):
-        if self._is_legacy(self.store.get(profile_id)):
+        profile = self.store.get(profile_id)
+        if profile and self._is_legacy(profile):
             return self.legacy_bridge.logs(limit)
-        return self._logs.get(profile_id, [])[-max(1, min(limit, 500)):]
+        with self._lock:
+            return list(self._logs.get(profile_id, [])[-max(1, min(limit, 500)):])
+
+    def _append_log(self, profile_id, line):
+        with self._lock:
+            lines = self._logs.setdefault(profile_id, [])
+            lines.append(str(line))
+            del lines[:-500]
+            self._log_sequences[profile_id] = self._log_sequences.get(profile_id, 0) + 1
+
+    def log_cursor(self, profile_id):
+        profile = self.store.get(profile_id)
+        if profile and self._is_legacy(profile):
+            return self.legacy_bridge.log_cursor()
+        with self._lock:
+            return self._log_sequences.get(profile_id, 0)
+
+    def logs_since(self, profile_id, cursor):
+        profile = self.store.get(profile_id)
+        if profile and self._is_legacy(profile):
+            return self.legacy_bridge.logs_since(cursor)
+        with self._lock:
+            added = max(0, self._log_sequences.get(profile_id, 0) - max(0, int(cursor)))
+            if not added:
+                return []
+            return list(self._logs.get(profile_id, [])[-min(added, 500):])
 
     def requires_eula(self, profile_id):
         profile = self.store.get(profile_id)
@@ -622,8 +649,8 @@ class MultiServerManager:
             self._started_at[profile_id] = time.time()
             self._phases[profile_id] = "running"
             self._phase_at[profile_id] = time.time()
-            self._logs.setdefault(profile_id, []).append(f"使用 Java {java_major}：{java_path}")
-            self._logs[profile_id].append("---------- 伺服器正在啟動 ----------")
+            self._append_log(profile_id, f"使用 Java {java_major}：{java_path}")
+            self._append_log(profile_id, "---------- 伺服器正在啟動 ----------")
             threading.Thread(target=self._read_output, args=(profile_id, process), daemon=True).start()
             return True, "已送出啟動要求"
 
@@ -631,10 +658,9 @@ class MultiServerManager:
         try:
             for line in iter(process.stdout.readline, ""):
                 if line:
-                    self._logs.setdefault(profile_id, []).append(line.rstrip())
-                    self._logs[profile_id] = self._logs[profile_id][-500:]
+                    self._append_log(profile_id, line.rstrip())
         finally:
-            self._logs.setdefault(profile_id, []).append("伺服器程序已停止")
+            self._append_log(profile_id, "伺服器程序已停止")
             self._phases[profile_id] = "error" if process.returncode not in (None, 0) else "stopped"
 
     def stop(self, profile_id, force=False):

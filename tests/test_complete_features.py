@@ -78,6 +78,92 @@ class CompleteFeatureTests(unittest.TestCase):
         ]
         self.assertEqual([item['name'] for item in manager.list(4)],['Alex'])
 
+    def test_player_inventory_queries_fresh_server_list(self):
+        class LiveMulti:
+            def __init__(inner_self):
+                inner_self.store=Mock();inner_self.store.get.return_value={'directory':self.root}
+                inner_self.lines=[];inner_self.cursor=0;inner_self.commands=[]
+            def log_cursor(inner_self,profile_id):return inner_self.cursor
+            def logs_since(inner_self,profile_id,cursor):return inner_self.lines[cursor:]
+            def send_command(inner_self,profile_id,command):
+                inner_self.commands.append(command)
+                inner_self.lines.append('[00:00:30] [Server thread/INFO] [minecraft/DedicatedServer]: There are 2/20 players online: Steve, Alex')
+                inner_self.cursor+=1
+                return True,'指令已送出'
+
+        multi=LiveMulti();manager=PlayerManager(multi,self.db)
+        inventory=manager.inventory(4,refresh=True)
+        self.assertEqual(multi.commands,['list'])
+        self.assertEqual(inventory['online_count'],2)
+        self.assertTrue(inventory['online_reliable'])
+        self.assertTrue(inventory['online_names_reliable'])
+        self.assertCountEqual([player['name'] for player in inventory['online']],['Steve','Alex'])
+        self.assertEqual(sum(bool(player['is_online']) for player in self.db.player_history(4)['players']),2)
+
+    def test_missing_player_log_evidence_does_not_mark_all_players_offline(self):
+        self.db.record_player_snapshot(4,[{'name':'Steve','uuid':'s'},{'name':'Alex','uuid':'a'}],now=100)
+        multi=Mock();multi.store.get.return_value={'directory':self.root};multi.logs.return_value=[]
+        manager=PlayerManager(multi,self.db)
+        self.assertCountEqual([player['name'] for player in manager.list(4)],['Steve','Alex'])
+        self.assertFalse(manager.last_snapshot_reliable[4])
+        self.assertIsNone(manager.online_counts[4])
+        self.assertEqual(sum(bool(player['is_online']) for player in self.db.player_history(4)['players']),2)
+
+    def test_live_query_does_not_replay_old_zero_snapshot_as_current(self):
+        class SilentMulti:
+            def __init__(inner_self):
+                inner_self.store=Mock();inner_self.store.get.return_value={'directory':self.root}
+                inner_self.lines=['[00:00:01] [Server thread/INFO]: There are 0/20 players online:']
+                inner_self.cursor=1;inner_self.commands=[]
+            def log_cursor(inner_self,profile_id):return inner_self.cursor
+            def logs_since(inner_self,profile_id,cursor):return inner_self.lines[cursor:]
+            def send_command(inner_self,profile_id,command):
+                inner_self.commands.append(command)
+                return True,'指令已送出'
+
+        multi=SilentMulti();manager=PlayerManager(multi,self.db);manager.live_query_timeout_seconds=0
+        inventory=manager.inventory(4,refresh=True)
+        self.assertEqual(multi.commands,['list'])
+        self.assertFalse(inventory['online_reliable'])
+        self.assertIsNone(inventory['online_count'])
+        self.assertEqual(inventory['online'],[])
+
+    def test_player_reliability_persists_between_incremental_log_batches(self):
+        class EventMulti:
+            def __init__(inner_self):
+                inner_self.store=Mock();inner_self.store.get.return_value={'directory':self.root}
+                inner_self.lines=['[00:00:10] [Server thread/INFO]: Steve joined the game'];inner_self.cursor=1
+            def log_cursor(inner_self,profile_id):return inner_self.cursor
+            def logs_since(inner_self,profile_id,cursor):return inner_self.lines[cursor:]
+
+        manager=PlayerManager(EventMulti(),self.db)
+        self.assertEqual([player['name'] for player in manager.list(4)],['Steve'])
+        self.assertTrue(manager.last_snapshot_reliable[4])
+        self.assertEqual([player['name'] for player in manager.list(4)],['Steve'])
+        self.assertTrue(manager.last_snapshot_reliable[4])
+        self.assertEqual(manager.online_counts[4],1)
+
+    def test_online_count_survives_incomplete_server_list_names(self):
+        self.db.record_player_snapshot(4,[{'name':'Steve','uuid':'s'},{'name':'Alex','uuid':'a'}],now=100)
+
+        class LiveMulti:
+            def __init__(inner_self):
+                inner_self.store=Mock();inner_self.store.get.return_value={'directory':self.root}
+                inner_self.lines=[];inner_self.cursor=0
+            def log_cursor(inner_self,profile_id):return inner_self.cursor
+            def logs_since(inner_self,profile_id,cursor):return inner_self.lines[cursor:]
+            def send_command(inner_self,profile_id,command):
+                inner_self.lines.append('[00:00:31] [Server thread/INFO]: There are 2/20 players online: Steve')
+                inner_self.cursor+=1
+                return True,'指令已送出'
+
+        inventory=PlayerManager(LiveMulti(),self.db).inventory(4,refresh=True)
+        self.assertEqual(inventory['online_count'],2)
+        self.assertTrue(inventory['online_reliable'])
+        self.assertFalse(inventory['online_names_reliable'])
+        self.assertEqual(inventory['online'],[])
+        self.assertEqual(sum(bool(player['is_online']) for player in self.db.player_history(4)['players']),2)
+
     def test_schedule_frequency_validation_and_webhook_masking(self):
         multi=Mock()
         multi.status.return_value={'running':False,'phase':'stopped','logs':[]}

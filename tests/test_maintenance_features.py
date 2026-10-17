@@ -210,7 +210,11 @@ class HistoryAndAlertTests(unittest.TestCase):
         monitor = MonitorService(Profiles(), Multi(), self.db, interval_seconds=1)
         try:
             deadline = time.time() + 3
-            while time.time() < deadline and not self.db.recent_metrics(42):
+            while time.time() < deadline:
+                has_metrics = bool(self.db.recent_metrics(42))
+                has_cpu_alert = any(event["alert_key"] == "cpu" for event in self.db.alert_events(42))
+                if has_metrics and has_cpu_alert:
+                    break
                 time.sleep(0.02)
             self.assertTrue(self.db.recent_metrics(42))
             self.assertTrue(any(event["alert_key"] == "cpu" for event in self.db.alert_events(42)))

@@ -50,45 +50,221 @@ def _post_webhook(url, payload):
 
 
 class PlayerManager:
-    def __init__(self,multi,db=None):self.multi=multi;self.db=db;self.last_snapshot_reliable={}
-    def _profile_directory(self,profile_id):
-        profile=self.multi.store.get(profile_id)
-        if not profile:raise FileNotFoundError('找不到伺服器')
+    def __init__(self, multi, db=None):
+        self.multi = multi
+        self.db = db
+        self.last_snapshot_reliable = {}
+        self.online_counts = {}
+        self.online_names_reliable = {}
+        self._processed_log_cursors = {}
+        self._live_query_cache = {}
+        self._profile_locks = {}
+        self._locks_guard = threading.Lock()
+        self.live_query_timeout_seconds = 2.5
+        self.live_query_cache_seconds = 1.0
+
+    def _profile_lock(self, profile_id):
+        with self._locks_guard:
+            return self._profile_locks.setdefault(profile_id, threading.RLock())
+
+    def _profile_directory(self, profile_id):
+        profile = self.multi.store.get(profile_id)
+        if not profile:
+            raise FileNotFoundError('找不到伺服器')
         return Path(profile['directory'])
+
     @staticmethod
     def _json_file(path):
         try:
-            value=json.loads(path.read_text(encoding='utf-8-sig'));return value if isinstance(value,list) else []
-        except (OSError,ValueError):return []
-    def inventory(self,profile_id):
-        directory=self._profile_directory(profile_id);cache=self._json_file(directory/'usercache.json')
-        whitelist=self._json_file(directory/'whitelist.json');ops=self._json_file(directory/'ops.json');banned=self._json_file(directory/'banned-players.json');banned_ips=self._json_file(directory/'banned-ips.json')
-        online=self.list(profile_id);history=self.db.player_history(profile_id,limit=500)['players'] if self.db else [];known={}
+            value = json.loads(path.read_text(encoding='utf-8-sig'))
+            return value if isinstance(value, list) else []
+        except (OSError, ValueError):
+            return []
+
+    @staticmethod
+    def _parse_snapshot_line(line):
+        match = re.search(r'\bThere are\s+(\d+).*?\bplayers?\s+online:\s*(.*)$', line, re.I)
+        if not match:
+            match = re.search(r'\b(\d+)\s+players?\s+online:\s*(.*)$', line, re.I)
+        if not match:
+            return None
+        count = int(match.group(1))
+        names = []
+        for raw_name in match.group(2).split(','):
+            name = raw_name.strip()
+            if re.fullmatch(r'[A-Za-z0-9_]{1,16}', name) and name.casefold() not in {item.casefold() for item in names}:
+                names.append(name)
+        return count, names
+
+    @classmethod
+    def _snapshot_from_lines(cls, lines):
+        snapshot = None
+        for line in lines:
+            candidate = cls._parse_snapshot_line(str(line))
+            if candidate is not None:
+                snapshot = candidate
+        return snapshot
+
+    def _request_live_snapshot(self, profile_id):
+        required = ('log_cursor', 'logs_since', 'send_command')
+        if any(not callable(getattr(type(self.multi), name, None)) for name in required):
+            return None
+        lock = self._profile_lock(profile_id)
+        with lock:
+            now = time.monotonic()
+            cached = self._live_query_cache.get(profile_id)
+            if cached and now - cached[0] <= self.live_query_cache_seconds:
+                return cached[1]
+            try:
+                cursor = self.multi.log_cursor(profile_id)
+                if not isinstance(cursor, int):
+                    return None
+                self._processed_log_cursors[profile_id] = max(
+                    self._processed_log_cursors.get(profile_id, 0), cursor
+                )
+                sent = self.multi.send_command(profile_id, 'list')
+            except Exception:
+                return None
+            if not isinstance(sent, tuple) or not sent or not sent[0]:
+                return None
+            deadline = time.monotonic() + self.live_query_timeout_seconds
+            while True:
+                try:
+                    snapshot = self._snapshot_from_lines(self.multi.logs_since(profile_id, cursor))
+                except Exception:
+                    self._live_query_cache[profile_id] = (time.monotonic(), None)
+                    return None
+                if snapshot is not None:
+                    self._live_query_cache[profile_id] = (time.monotonic(), snapshot)
+                    return snapshot
+                if time.monotonic() >= deadline:
+                    self._live_query_cache[profile_id] = (time.monotonic(), None)
+                    return None
+                time.sleep(0.05)
+
+    def _players_with_uuids(self, profile_id, names):
+        directory = self._profile_directory(profile_id)
+        cache = {
+            str(item.get('name', '')).casefold(): item.get('uuid', '')
+            for item in self._json_file(directory / 'usercache.json') if isinstance(item, dict)
+        }
+        return [{'name': name, 'uuid': cache.get(name.casefold(), '')} for name in names]
+
+    def _new_log_lines(self, profile_id):
+        cursor_method = getattr(type(self.multi), 'log_cursor', None)
+        since_method = getattr(type(self.multi), 'logs_since', None)
+        if callable(cursor_method) and callable(since_method):
+            previous_cursor = self._processed_log_cursors.get(profile_id, 0)
+            try:
+                lines = self.multi.logs_since(profile_id, previous_cursor)
+                current_cursor = self.multi.log_cursor(profile_id)
+                if isinstance(current_cursor, int):
+                    self._processed_log_cursors[profile_id] = max(previous_cursor, current_cursor)
+                return lines
+            except (AttributeError, KeyError, OSError, TypeError, ValueError):
+                return self.multi.logs(profile_id, 500)
+        return self.multi.logs(profile_id, 500)
+
+    def list(self, profile_id, refresh=False):
+        if refresh:
+            snapshot = self._request_live_snapshot(profile_id)
+            if snapshot is not None:
+                count, names = snapshot
+                names_reliable = count == 0 or len(names) >= count
+                players = self._players_with_uuids(profile_id, names) if names_reliable else []
+                with self._profile_lock(profile_id):
+                    self.online_counts[profile_id] = count
+                    self.last_snapshot_reliable[profile_id] = True
+                    self.online_names_reliable[profile_id] = names_reliable
+                    if self.db and names_reliable:
+                        self.db.record_player_snapshot(profile_id, players)
+                return players
+            with self._profile_lock(profile_id):
+                self.last_snapshot_reliable[profile_id] = False
+                self.online_names_reliable[profile_id] = False
+                self.online_counts[profile_id] = None
+            return []
+
+        with self._profile_lock(profile_id):
+            online = {}
+            if self.db:
+                previous = self.db.player_history(profile_id, limit=500)['players']
+                online = {item['name'].casefold(): item['name'] for item in previous if item['is_online']}
+            found = False
+            names_reliable = True
+            reported_count = None
+            for line in self._new_log_lines(profile_id):
+                snapshot = self._parse_snapshot_line(str(line))
+                if snapshot is not None:
+                    count, names = snapshot
+                    reported_count = count
+                    found = True
+                    if count == 0 or len(names) >= count:
+                        online = {name.casefold(): name for name in names}
+                        names_reliable = True
+                    else:
+                        online = {}
+                        names_reliable = False
+                    continue
+                joined = re.search(r'\b([A-Za-z0-9_]{1,16}) joined the game\b', str(line), re.I)
+                left = re.search(r'\b([A-Za-z0-9_]{1,16}) left the game\b', str(line), re.I)
+                if joined:
+                    online[joined.group(1).casefold()] = joined.group(1)
+                    found = True
+                    if names_reliable:
+                        reported_count = len(online)
+                elif left:
+                    online.pop(left.group(1).casefold(), None)
+                    found = True
+                    if names_reliable:
+                        reported_count = len(online)
+
+            if found:
+                self.last_snapshot_reliable[profile_id] = True
+                self.online_names_reliable[profile_id] = names_reliable
+                self.online_counts[profile_id] = reported_count if reported_count is not None else len(online)
+            else:
+                self.last_snapshot_reliable.setdefault(profile_id, False)
+                self.online_names_reliable.setdefault(profile_id, False)
+                self.online_counts.setdefault(profile_id, None)
+            directory = self._profile_directory(profile_id)
+            cache = {
+                str(item.get('name', '')).casefold(): item.get('uuid', '')
+                for item in self._json_file(directory / 'usercache.json') if isinstance(item, dict)
+            }
+            players = [{'name': name, 'uuid': cache.get(name.casefold(), '')} for name in online.values()]
+            if self.db and found and names_reliable:
+                self.db.record_player_snapshot(profile_id, players)
+            return players
+
+    def inventory(self, profile_id, refresh=False):
+        online = self.list(profile_id, refresh=refresh)
+        reliable = bool(self.last_snapshot_reliable.get(profile_id))
+        names_reliable = bool(self.online_names_reliable.get(profile_id))
+        directory = self._profile_directory(profile_id)
+        cache = self._json_file(directory / 'usercache.json')
+        whitelist = self._json_file(directory / 'whitelist.json')
+        ops = self._json_file(directory / 'ops.json')
+        banned = self._json_file(directory / 'banned-players.json')
+        banned_ips = self._json_file(directory / 'banned-ips.json')
+        history = self.db.player_history(profile_id, limit=500)['players'] if self.db else []
+        known = {}
         for item in cache:
-            if isinstance(item,dict) and item.get('name'):known[str(item['name']).casefold()]={'name':item['name'],'uuid':item.get('uuid',''),'expires_on':item.get('expiresOn',''),'source':'usercache'}
-        for item in history:known[item['name'].casefold()]={**known.get(item['name'].casefold(),{}),**item,'source':'history'}
-        return {'online':online,'known':list(known.values()),'whitelist':whitelist,'ops':ops,'banned_players':banned,'banned_ips':banned_ips}
-    def list(self,profile_id):
-        logs=self.multi.logs(profile_id,500);online={}
-        if self.db:
-            previous=self.db.player_history(profile_id,limit=500)['players'];online={item['name'].casefold():item['name'] for item in previous if item['is_online']}
-        found=False
-        for line in logs:
-            match=re.search(r'(?:There are\s+\d+.*?online:\s*|\d+\s+players?\s+online:\s*)(.*)$',line,re.I)
-            if match:
-                names=[name.strip() for name in match.group(1).split(',') if name.strip() and name.strip().lower() not in {'none','no one'}]
-                online={name.casefold():name for name in names};found=True
-                continue
-            joined=re.search(r'\]:\s*(?:\[[^\]]+\]\s*:?\s*)?([A-Za-z0-9_]{1,16}) joined the game',line,re.I)
-            left=re.search(r'\]:\s*(?:\[[^\]]+\]\s*:?\s*)?([A-Za-z0-9_]{1,16}) left the game',line,re.I)
-            if joined:online[joined.group(1).casefold()]=joined.group(1);found=True
-            elif left:online.pop(left.group(1).casefold(),None);found=True
-        if not found:online={}
-        self.last_snapshot_reliable[profile_id]=found;directory=self._profile_directory(profile_id)
-        cache={str(item.get('name','')).casefold():item.get('uuid','') for item in self._json_file(directory/'usercache.json') if isinstance(item,dict)}
-        players=[{'name':name,'uuid':cache.get(name.casefold(),'')} for name in online.values()]
-        if self.db and found:self.db.record_player_snapshot(profile_id,players)
-        return players
+            if isinstance(item, dict) and item.get('name'):
+                known[str(item['name']).casefold()] = {
+                    'name': item['name'], 'uuid': item.get('uuid', ''),
+                    'expires_on': item.get('expiresOn', ''), 'source': 'usercache',
+                }
+        for item in history:
+            known[item['name'].casefold()] = {**known.get(item['name'].casefold(), {}), **item, 'source': 'history'}
+        return {
+            'online': online if reliable and names_reliable else [],
+            'online_count': self.online_counts.get(profile_id) if reliable else None,
+            'online_reliable': reliable,
+            'online_names_reliable': names_reliable,
+            'known': list(known.values()), 'whitelist': whitelist, 'ops': ops,
+            'banned_players': banned, 'banned_ips': banned_ips,
+        }
     def command(self,profile_id,action,player):
         player=str(player).strip();commands={'kick':f'kick {player}','ban':f'ban {player}','pardon':f'pardon {player}','op':f'op {player}','deop':f'deop {player}','whitelist_add':f'whitelist add {player}','whitelist_remove':f'whitelist remove {player}'}
         if action not in commands:return False,'不支援的玩家操作'

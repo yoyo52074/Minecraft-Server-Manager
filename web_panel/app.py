@@ -722,18 +722,16 @@ def create_app(controller, database_path):
     @app.get("/api/servers/{profile_id}/players")
     def players_api(profile_id: int, request: Request):
         require_server_permission(request, profile_id, "players.view")
-        return app.state.players.inventory(profile_id)
+        return app.state.players.inventory(profile_id, refresh=True)
 
     @app.get("/api/servers/{profile_id}/players/history")
     def players_history(profile_id: int, request: Request, q: str = "", limit: int = 100, offset: int = 0):
         require_server_permission(request, profile_id, "players.view")
-        app.state.players.list(profile_id)
         return {**db.player_history(profile_id, q, limit, offset), "events": db.player_events(profile_id, limit=min(max(limit,1),500))}
 
     @app.get("/api/servers/{profile_id}/players/export.csv")
     def players_export(profile_id: int, request: Request, q: str = ""):
         require_server_permission(request, profile_id, "players.view")
-        app.state.players.list(profile_id)
         rows=db.player_history(profile_id,q,500,0)["players"]
         output=io.StringIO(newline="")
         writer=csv.writer(output);writer.writerow(["玩家名稱","UUID","首次記錄","最後在線","最後登入","在線中","累計在線秒數"])

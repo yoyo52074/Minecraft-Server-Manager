@@ -13,6 +13,7 @@ class ServerBridge:
         self.controller = controller
         self._lock = threading.RLock()
         self._logs = []
+        self._log_cursor = 0
         self._started_at = None
 
     def attach(self):
@@ -22,6 +23,7 @@ class ServerBridge:
             with self._lock:
                 self._logs.append(str(message))
                 self._logs = self._logs[-500:]
+                self._log_cursor += 1
             return original_log(message, tag_override)
 
         self.controller.log = log_proxy
@@ -43,6 +45,17 @@ class ServerBridge:
     def logs(self, limit=100):
         with self._lock:
             return self._logs[-max(1, min(limit, 500)):]
+
+    def log_cursor(self):
+        with self._lock:
+            return self._log_cursor
+
+    def logs_since(self, cursor):
+        with self._lock:
+            added = max(0, self._log_cursor - max(0, int(cursor)))
+            if not added:
+                return []
+            return self._logs[-min(added, 500):]
 
     def start(self):
         with self._lock:
