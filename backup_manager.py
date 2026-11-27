@@ -24,23 +24,37 @@ class BackupManager:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in label)
         archive_path = os.path.join(self.backup_directory, f"backup-{timestamp}-{safe_label}.zip")
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in sorted(self.INCLUDED_FILES):
-                path = os.path.join(self.server_directory, name)
-                if os.path.isfile(path):
-                    archive.write(path, name)
-            for directory in sorted(self.INCLUDED_DIRS):
-                path = os.path.join(self.server_directory, directory)
-                if os.path.isdir(path):
-                    for root, _, files in os.walk(path):
-                        for filename in files:
-                            file_path = os.path.join(root, filename)
-                            archive.write(file_path, os.path.relpath(file_path, self.server_directory))
-        return archive_path
+        temp_path = f"{archive_path}.part"
+        try:
+            with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in sorted(self.INCLUDED_FILES):
+                    path = os.path.join(self.server_directory, name)
+                    if os.path.isfile(path):
+                        archive.write(path, name)
+                for directory in sorted(self.INCLUDED_DIRS):
+                    path = os.path.join(self.server_directory, directory)
+                    if os.path.isdir(path):
+                        for root, _, files in os.walk(path):
+                            for filename in files:
+                                file_path = os.path.join(root, filename)
+                                archive.write(file_path, os.path.relpath(file_path, self.server_directory))
+            os.replace(temp_path, archive_path)
+            return archive_path
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
 
     def list_backups(self):
         return sorted(
-            (os.path.join(self.backup_directory, name) for name in os.listdir(self.backup_directory)),
+            (
+                os.path.join(self.backup_directory, name)
+                for name in os.listdir(self.backup_directory)
+                if name.lower().endswith(".zip") and os.path.isfile(os.path.join(self.backup_directory, name))
+            ),
             key=os.path.getmtime,
             reverse=True,
         )

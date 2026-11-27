@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from backup_manager import BackupManager
 from core_metadata import CoreMetadata
@@ -29,6 +30,19 @@ class V2FeatureTests(unittest.TestCase):
         manager.restore_backup(archive)
         with open(os.path.join(self.server_dir, "server.properties"), encoding="utf-8") as file:
             self.assertEqual(file.read(), "motd=before\n")
+
+    def test_backup_failed_cleans_up_part_and_list_ignores_non_zip(self):
+        manager = BackupManager(self.server_dir)
+        with open(os.path.join(manager.backup_directory, "leftover.zip.part"), "wb") as file:
+            file.write(b"partial")
+        self.assertEqual(manager.list_backups(), [])
+        with open(os.path.join(self.server_dir, "server.properties"), "w", encoding="utf-8") as file:
+            file.write("motd=test\n")
+        with patch("backup_manager.zipfile.ZipFile.write", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                manager.create_backup("fail")
+        part_files = [name for name in os.listdir(manager.backup_directory) if name != "leftover.zip.part"]
+        self.assertEqual(part_files, [])
 
     def test_backup_rejects_path_traversal(self):
         archive = os.path.join(self.server_dir, "bad.zip")
