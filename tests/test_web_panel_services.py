@@ -2,9 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from web_panel.bridge import ServerBridge
 from web_panel.database import WebDatabase
 from web_panel.file_service import SafeFileService
-from web_panel.multi_server import CoreAdapter, ServerProfileStore
+from web_panel.multi_server import CoreAdapter, MultiServerManager, ServerProfileStore
+from web_panel.operations import PlayerManager
 
 
 class WebPanelServiceTests(unittest.TestCase):
@@ -46,6 +48,29 @@ class WebPanelServiceTests(unittest.TestCase):
         self.db.set_server_permissions(user_id, profile["id"], {"server.view", "files.view"})
         self.assertTrue(self.db.has_server_permission(user, profile["id"], "server.view"))
         self.assertFalse(self.db.has_server_permission(user, profile["id"], "server.stop"))
+
+    def test_command_and_player_injection_rejected(self):
+        class DummyController:
+            server_process = None
+            server_directory = self.temp.name
+            web_panel_port = 8765
+            def log(self, message, tag_override=None):
+                pass
+
+        bridge = ServerBridge(DummyController())
+        ok, msg = bridge.send_command("say hi\nop hacker")
+        self.assertFalse(ok)
+        self.assertIn("控制字元", msg)
+
+        multi = MultiServerManager(self.store, bridge)
+        ok, msg = multi.send_command(9999, "list")
+        self.assertFalse(ok)
+        self.assertIn("找不到伺服器", msg)
+
+        players = PlayerManager(multi)
+        ok, msg = players.command(1, "kick", "bad\nop evil")
+        self.assertFalse(ok)
+        self.assertIn("無效的玩家名稱", msg)
 
 
 if __name__ == "__main__":

@@ -333,18 +333,29 @@ class MultiServerManager:
 
     def send_command(self, profile_id, command):
         profile = self.store.get(profile_id)
+        if not profile:
+            return False, "找不到伺服器"
         if self._is_legacy(profile):
             return self.legacy_bridge.send_command(command)
         process = self._processes.get(profile_id)
         if not process or process.poll() is not None:
             return False, "伺服器目前沒有運行"
-        if not command.strip() or len(command) > 512:
+        cleaned = command.strip()
+        if not cleaned or len(cleaned) > 512:
             return False, "指令不可為空或超過 512 個字元"
+        if "\r" in cleaned or "\n" in cleaned or "\x00" in cleaned:
+            return False, "指令包含不允許的控制字元"
         if not process.stdin:
             return False, "伺服器主控台輸入串流不可用"
         try:
-            process.stdin.write(command.strip() + "\n")
+            process.stdin.write(cleaned + "\n")
             process.stdin.flush()
         except (OSError, BrokenPipeError) as exc:
             return False, f"指令發送失敗：{exc}"
         return True, "指令已送出"
+
+    def stop_all(self):
+        with self._lock:
+            profile_ids = list(self._processes.keys())
+        for profile_id in profile_ids:
+            self.stop(profile_id)
