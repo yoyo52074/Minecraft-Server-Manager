@@ -34,11 +34,16 @@ class ApplicationController:
         self.backup_manager = BackupManager(self.server_directory)
         self.core_metadata = CoreMetadata(self.server_directory)
         self.diagnostics = ServerDiagnostics(self.server_directory)
-        self.web_panel_host = config.get("web_host", "127.0.0.1")
-        self.web_panel_port = int(config.get("web_port", 8765))
+        self.web_panel_host = str(config.get("web_host") or "127.0.0.1").strip() or "127.0.0.1"
+        try:
+            web_port = int(config.get("web_port", 8765))
+            self.web_panel_port = web_port if 1 <= web_port <= 65535 else 8765
+        except (TypeError, ValueError):
+            self.web_panel_port = 8765
         self.web_startup_log_path = os.path.join(self.app_directory, "web_panel_startup.log")
         self.web_bridge = ServerBridge(self)
         self.web_bridge.attach()
+        self.web_app = None
         self.web_server = None
         self.web_thread = None
         self.root.core_combo.bind("<<ComboboxSelected>>", self.on_core_selected)
@@ -81,6 +86,7 @@ class ApplicationController:
             from uvicorn import Config, Server
 
             app = create_app(self, os.path.join(self.app_directory, "web_panel.db"))
+            self.web_app = app
             self.web_server = Server(Config(
                 app,
                 host=self.web_panel_host,
@@ -118,10 +124,21 @@ class ApplicationController:
             pass
 
     def stop_web_panel(self):
+        if self.web_app is not None:
+            scheduler = getattr(self.web_app.state, "scheduler", None)
+            if scheduler is not None:
+                scheduler.stop_event.set()
+            multi = getattr(self.web_app.state, "multi", None)
+            if multi is not None:
+                try:
+                    multi.stop_all()
+                except Exception:
+                    pass
         if self.web_server:
             self.web_server.should_exit = True
             self.web_server = None
             self.web_thread = None
+        self.web_app = None
 
     def start_indeterminate_progress(self, speed=10):
         self.root.progress_bar.config(mode="indeterminate")
@@ -177,6 +194,9 @@ class ApplicationController:
             messagebox.showerror("還原失敗", str(exc))
 
     def start_playit_tunnel(self):
+        if self.playit_process and self.playit_process.poll() is None:
+            self.log("Playit.gg 已經在運行中。", "info")
+            return
         if not os.path.exists(self.playit_executable_path):
             self.log("錯誤：找不到捆綁的 playit.exe 檔案！", "error")
             messagebox.showerror(
@@ -232,8 +252,9 @@ class ApplicationController:
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+            except (json.JSONDecodeError, OSError):
                 return {}
         return {}
 
@@ -469,7 +490,7 @@ class ApplicationController:
         self.set_status("正在設定 EULA...")
         eula_path = os.path.join(self.server_manager.server_directory, "eula.txt")
         try:
-            with open(eula_path, "w") as f:
+            with open(eula_path, "w", encoding="utf-8") as f:
                 f.write("eula=true\n")
             self.log("EULA 同意完成！", "success")
             self.set_status("伺服器準備就緒！")
@@ -736,8 +757,15 @@ class ApplicationController:
             self.stop_playit_tunnel()
         if self.server_process and self.server_process.poll() is None:
             self.log("正在向伺服器發送 'stop' 指令...", "warn")
-            self.server_process.stdin.write("stop\n")
-            self.server_process.stdin.flush()
+            try:
+                self.server_process.stdin.write("stop\n")
+                self.server_process.stdin.flush()
+            except (OSError, BrokenPipeError) as exc:
+                self.log(f"發送停止指令失敗，嘗試強制結束程序：{exc}", "error")
+                try:
+                    self.server_process.terminate()
+                except OSError:
+                    pass
         else:
             messagebox.showinfo("提示", "伺服器未在運行中。")
 
@@ -746,6 +774,7 @@ class ApplicationController:
             if not messagebox.askyesno("確認", "伺服器仍在運行中，確定要關閉嗎？"):
                 return
             self.stop_server()
+            self.stop_web_panel()
             self.root.after(3000, self.root.destroy)
             return
         if self.playit_process:
