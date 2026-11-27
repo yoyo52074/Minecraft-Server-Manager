@@ -11,6 +11,7 @@ class JavaManager:
         candidates=[]
         seen=set()
         for raw in [os.environ.get('JAVA_HOME','')]+os.environ.get('PATH','').split(os.pathsep):
+            if not raw: continue
             p=Path(raw)
             if p.name.lower()=='bin': p=p.parent
             exe=p/'bin'/'java.exe' if os.name=='nt' else p/'bin'/'java'
@@ -27,12 +28,11 @@ class JavaManager:
                 text=(r.stderr or '')+'\n'+(r.stdout or '')
                 m=re.search(r'version "([^"]+)',text); version=m.group(1) if m else '未知'; ok=r.returncode==0
             except (OSError,subprocess.SubprocessError): pass
-            candidates[-1:] = candidates[-1:] if False else candidates[-1:]
-            # replace by a serializable record
             yield {'path':key,'version':version,'available':ok}
     def list(self): return list(self.scan())
 
 class PlayerManager:
+    PLAYER_NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,16}$')
     def __init__(self, multi): self.multi=multi
     def list(self, profile_id):
         logs=self.multi.logs(profile_id,500)
@@ -42,6 +42,9 @@ class PlayerManager:
             if m: names=[x.strip() for x in m.group(1).split(',') if x.strip()]
         return [{'name':n} for n in names]
     def command(self, profile_id, action, player):
+        player = (player or '').strip()
+        if not self.PLAYER_NAME_RE.match(player):
+            return False, '無效的玩家名稱（僅允許 1~16 位英數字與底線）'
         commands={'kick':f'kick {player}','ban':f'ban {player}','pardon':f'pardon {player}','op':f'op {player}','deop':f'deop {player}','whitelist_add':f'whitelist add {player}','whitelist_remove':f'whitelist remove {player}'}
         if action not in commands: return False,'不支援的玩家操作'
         return self.multi.send_command(profile_id,commands[action])

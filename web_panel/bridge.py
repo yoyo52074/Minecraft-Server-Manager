@@ -69,6 +69,8 @@ class ServerBridge:
         command = command.strip()
         if not command or len(command) > 512:
             return False, "指令不可為空或超過 512 個字元"
+        if "\r" in command or "\n" in command or "\x00" in command:
+            return False, "指令包含不允許的控制字元"
         process = self.controller.server_process
         if not process or process.poll() is not None:
             return False, "伺服器目前沒有運行"

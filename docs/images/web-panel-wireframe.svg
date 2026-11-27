@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" width="760" height="400">
+  <rect x="0" y="0" width="760" height="400" fill="#ffffff"/>
+  <g stroke="#111111" stroke-width="1.5" fill="none">
+    <!-- 外框與頂部導覽列 -->
+    <rect x="16" y="14" width="728" height="372"/>
+    <line x1="16" y1="50" x2="744" y2="50"/>
+    <rect x="652" y="23" width="76" height="20"/>
+
+    <!-- 次導覽按鈕 -->
+    <rect x="34" y="64" width="78" height="24"/>
+    <rect x="122" y="64" width="58" height="24"/>
+    <rect x="188" y="64" width="58" height="24"/>
+    <rect x="254" y="64" width="58" height="24"/>
+    <rect x="320" y="64" width="84" height="24"/>
+
+    <!-- 左側：伺服器控制卡 -->
+    <rect x="34" y="102" width="240" height="132"/>
+    <rect x="48" y="192" width="58" height="26"/>
+    <rect x="114" y="192" width="58" height="26"/>
+    <rect x="180" y="192" width="80" height="26"/>
+
+    <!-- 右側：即時主控台卡 -->
+    <rect x="290" y="102" width="436" height="132"/>
+    <rect x="304" y="130" width="336" height="24"/>
+    <rect x="648" y="130" width="64" height="24"/>
+    <rect x="304" y="162" width="408" height="58"/>
+
+    <!-- 下方四張資源曲線卡 -->
+    <rect x="34" y="248" width="164" height="120"/>
+    <rect x="210" y="248" width="164" height="120"/>
+    <rect x="386" y="248" width="164" height="120"/>
+    <rect x="562" y="248" width="164" height="120"/>
+
+    <!-- 簡易狀態曲線 -->
+    <path d="M 46 348 C 72 344, 96 318, 122 326 C 144 332, 162 304, 186 312"/>
+    <path d="M 222 346 C 254 338, 282 320, 314 318 C 336 316, 350 315, 362 314"/>
+    <path d="M 398 342 L 538 342"/>
+    <path d="M 574 348 C 600 340, 628 336, 654 322 C 678 310, 698 308, 714 298"/>
+  </g>
+
+  <g fill="#111111" font-family="sans-serif" font-size="12">
+    <text x="34" y="36" font-weight="bold">Minecraft Server Manager (Web 面板線框示意圖)</text>
+    <text x="510" y="36">總覽</text>
+    <text x="560" y="36">帳號管理</text>
+    <text x="666" y="37" font-size="11">登出</text>
+
+    <text x="45" y="80" font-size="11">← 伺服器列表</text>
+    <text x="137" y="80" font-size="11">備份</text>
+    <text x="203" y="80" font-size="11">玩家</text>
+    <text x="269" y="80" font-size="11">排程</text>
+    <text x="331" y="80" font-size="11">伺服器設定</text>
+
+    <text x="48" y="124" font-weight="bold">伺服器控制</text>
+    <text x="48" y="152" font-size="15" font-weight="bold">狀態：運行中</text>
+    <text x="48" y="174" font-size="11">Paper 1.21.1 ｜ 連接埠 25565</text>
+    <text x="64" y="209" font-size="11">啟動</text>
+    <text x="130" y="209" font-size="11">停止</text>
+    <text x="196" y="209" font-size="11">強制停止</text>
+
+    <text x="304" y="122" font-weight="bold">即時主控台 (WebSocket)</text>
+    <text x="312" y="146" font-size="11">輸入 Minecraft 指令...</text>
+    <text x="668" y="146" font-size="11">發送</text>
+    <text x="312" y="180" font-family="monospace" font-size="11">[Server thread/INFO]: Preparing spawn area: 84%</text>
+    <text x="312" y="198" font-family="monospace" font-size="11">[Server thread/INFO]: Done (4.12s)! For help, type "help"</text>
+
+    <text x="46" y="268" font-weight="bold">CPU 負載</text>
+    <text x="46" y="290" font-size="14">14.2%</text>
+
+    <text x="222" y="268" font-weight="bold">記憶體 (RSS)</text>
+    <text x="222" y="290" font-size="14">1840 MB</text>
+
+    <text x="398" y="268" font-weight="bold">磁碟使用率</text>
+    <text x="398" y="290" font-size="14">42.5%</text>
+
+    <text x="574" y="268" font-weight="bold">網路累計流量</text>
+    <text x="574" y="290" font-size="14">128.4 MB</text>
+  </g>
+</svg>
