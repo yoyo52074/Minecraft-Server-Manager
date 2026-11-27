@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -19,11 +20,16 @@ class WebDatabase:
         self.password_hasher = PasswordHasher()
         self._init_schema()
 
+    @contextlib.contextmanager
     def _connect(self):
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _init_schema(self):
         with self._connect() as db:
